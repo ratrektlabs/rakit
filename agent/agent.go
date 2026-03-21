@@ -9,6 +9,7 @@ import (
 
 	"github.com/ratrektlabs/rl-agent/memory"
 	"github.com/ratrektlabs/rl-agent/provider"
+	"github.com/ratrektlabs/rl-agent/skill"
 	"github.com/ratrektlabs/rl-agent/tool"
 )
 
@@ -481,4 +482,215 @@ type StopSignal struct {
 
 func Stop() StopSignal {
 	return StopSignal{Stop: true}
+}
+
+type Builder struct {
+	provider     provider.Provider
+	model        string
+	systemPrompt string
+	temperature  float64
+	maxTokens    int
+	maxSteps     int
+	tools        *tool.Registry
+	skills       *skill.Registry
+	memory       memory.Memory
+	hooks        Hooks
+}
+
+func NewBuilder(p provider.Provider) *Builder {
+	return &Builder{
+		provider:    p,
+		temperature: 0.7,
+		maxTokens:   4096,
+		maxSteps:    10,
+		tools:       tool.NewRegistry(),
+		skills:      skill.NewRegistry(),
+	}
+}
+
+func (b *Builder) WithModel(model string) *Builder {
+	b.model = model
+	return b
+}
+
+func (b *Builder) WithSystemPrompt(prompt string) *Builder {
+	b.systemPrompt = prompt
+	return b
+}
+
+func (b *Builder) WithTemperature(temp float64) *Builder {
+	b.temperature = temp
+	return b
+}
+
+func (b *Builder) WithMaxTokens(tokens int) *Builder {
+	b.maxTokens = tokens
+	return b
+}
+
+func (b *Builder) WithMaxSteps(steps int) *Builder {
+	b.maxSteps = steps
+	return b
+}
+
+func (b *Builder) WithToolRegistry(registry *tool.Registry) *Builder {
+	b.tools = registry
+	return b
+}
+
+func (b *Builder) WithToolFromRegistry(registry *tool.Registry, name string) *Builder {
+	if registry == nil {
+		return b
+	}
+	t, err := registry.Get(name)
+	if err != nil {
+		return b
+	}
+	_ = b.tools.Register(t)
+	return b
+}
+
+func (b *Builder) WithToolsFromRegistry(registry *tool.Registry, names ...string) *Builder {
+	if registry == nil {
+		return b
+	}
+	for _, name := range names {
+		b.WithToolFromRegistry(registry, name)
+	}
+	return b
+}
+
+func (b *Builder) WithToolFunc(name, description string, params map[string]interface{}, fn func(ctx context.Context, params map[string]any) (any, error)) *Builder {
+	_ = b.tools.RegisterFunc(name, description, params, fn)
+	return b
+}
+
+func (b *Builder) WithTool(t interface{}) *Builder {
+	_ = b.tools.Register(t)
+	return b
+}
+
+func (b *Builder) WithSkillRegistry(registry *skill.Registry) *Builder {
+	b.skills = registry
+	return b
+}
+
+func (b *Builder) WithSkillFromRegistry(registry *skill.Registry, name string) *Builder {
+	if registry == nil {
+		return b
+	}
+	s, err := registry.Get(name)
+	if err != nil {
+		return b
+	}
+	_ = b.skills.Register(s)
+	for _, t := range s.Tools() {
+		_ = b.tools.Register(t)
+	}
+	return b
+}
+
+func (b *Builder) WithSkillsFromRegistry(registry *skill.Registry, names ...string) *Builder {
+	for _, name := range names {
+		b.WithSkillFromRegistry(registry, name)
+	}
+	return b
+}
+
+func (b *Builder) WithSkill(s interface{}) *Builder {
+	if err := b.skills.Register(s); err != nil {
+		return b
+	}
+	// Also register skill's tools
+	var skillImpl skill.Skill
+	switch v := s.(type) {
+	case skill.Skill:
+		skillImpl = v
+	case *skill.Builder:
+		built, err := v.Build()
+		if err != nil {
+			return b
+		}
+		skillImpl = built
+	}
+	if skillImpl != nil {
+		for _, t := range skillImpl.Tools() {
+			_ = b.tools.Register(t)
+		}
+	}
+	return b
+}
+
+
+
+func (b *Builder) WithMemory(m memory.Memory) *Builder {
+	b.memory = m
+	return b
+}
+
+func (b *Builder) WithHooks(hooks Hooks) *Builder {
+	b.hooks = hooks
+	return b
+}
+
+func (b *Builder) Build() *Agent {
+	return &Agent{
+		provider: b.provider,
+		tools:    b.tools,
+		memory:   b.memory,
+		model:    b.model,
+		state:    StateIdle,
+		options: &Options{
+			SystemPrompt: b.systemPrompt,
+			Temperature:  b.temperature,
+			MaxTokens:    b.maxTokens,
+			MaxSteps:     b.maxSteps,
+			Hooks:        b.hooks,
+		},
+	}
+}
+
+func (a *Agent) AddTool(t interface{}) error {
+	return a.tools.Register(t)
+}
+
+func (a *Agent) AddToolFunc(name, description string, params map[string]interface{}, fn func(ctx context.Context, params map[string]any) (any, error)) error {
+	return a.tools.RegisterFunc(name, description, params, fn)
+}
+
+func (a *Agent) AddSkill(s interface{}) error {
+	var skillImpl skill.Skill
+	switch v := s.(type) {
+	case skill.Skill:
+		skillImpl = v
+	case *skill.Builder:
+		built, err := v.Build()
+		if err != nil {
+			return err
+		}
+		skillImpl = built
+	default:
+		return errors.New("invalid skill type")
+	}
+	
+	for _, t := range skillImpl.Tools() {
+		if err := a.tools.Register(t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Agent) AddFluentSkill(s *skill.Builder) error {
+	return a.AddSkill(s)
+}
+
+func (a *Agent) GetToolRegistry() *tool.Registry {
+	return a.tools
+}
+
+func (a *Agent) GetModel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.model
 }

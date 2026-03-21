@@ -34,11 +34,25 @@ func NewRegistry() *Registry {
 	}
 }
 
-func (r *Registry) Register(t Tool) error {
+func (r *Registry) Register(t interface{}) error {
+	var tool Tool
+	switch v := t.(type) {
+	case Tool:
+		tool = v
+	case *Builder:
+		built, err := v.Build()
+		if err != nil {
+			return err
+		}
+		tool = built
+	default:
+		return errors.New("tool must implement Tool interface or be *Builder")
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	name := t.Name()
+	name := tool.Name()
 	if name == "" {
 		return errors.New("tool name cannot be empty")
 	}
@@ -47,7 +61,7 @@ func (r *Registry) Register(t Tool) error {
 		return fmt.Errorf("tool %q already registered", name)
 	}
 
-	r.tools[name] = t
+	r.tools[name] = tool
 	return nil
 }
 
@@ -240,4 +254,108 @@ func ParamsFromJSON(schema json.RawMessage) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("failed to parse JSON schema: %w", err)
 	}
 	return params, nil
+}
+
+type Builder struct {
+	name        string
+	description string
+	params      map[string]interface{}
+	required    []string
+	action      func(ctx context.Context, params map[string]any) (any, error)
+}
+
+func New(name string) *Builder {
+	return &Builder{
+		name:   name,
+		params: make(map[string]interface{}),
+	}
+}
+
+func (t *Builder) Desc(desc string) *Builder {
+	t.description = desc
+	return t
+}
+
+func (t *Builder) Param(name, typ, desc string, required bool) *Builder {
+	t.params[name] = map[string]interface{}{
+		"type":        typ,
+		"description": desc,
+	}
+	if required {
+		t.required = append(t.required, name)
+	}
+	return t
+}
+
+func (t *Builder) ParamWithSchema(name string, schema map[string]interface{}, required bool) *Builder {
+	t.params[name] = schema
+	if required {
+		t.required = append(t.required, name)
+	}
+	return t
+}
+
+func (t *Builder) Action(fn func(ctx context.Context, params map[string]any) (any, error)) *Builder {
+	t.action = fn
+	return t
+}
+
+func (t *Builder) Build() (Tool, error) {
+	if t.name == "" {
+		return nil, errors.New("tool name is required")
+	}
+	if t.action == nil {
+		return nil, errors.New("tool action is required")
+	}
+
+	schema := map[string]interface{}{
+		"type":       "object",
+		"properties": t.params,
+	}
+	if len(t.required) > 0 {
+		schema["required"] = t.required
+	}
+
+	return &funcTool{
+		name:        t.name,
+		description: t.description,
+		parameters:  schema,
+		execute:     t.action,
+	}, nil
+}
+
+func (t *Builder) MustBuild() Tool {
+	tool, err := t.Build()
+	if err != nil {
+		panic(fmt.Sprintf("failed to build tool: %v", err))
+	}
+	return tool
+}
+
+func (r *Registry) MustRegister(t Tool) {
+	if err := r.Register(t); err != nil {
+		panic(fmt.Sprintf("failed to register tool: %v", err))
+	}
+}
+
+func (r *Registry) MustRegisterFunc(name, description string, params map[string]interface{}, fn func(ctx context.Context, params map[string]any) (any, error)) {
+	if err := r.RegisterFunc(name, description, params, fn); err != nil {
+		panic(fmt.Sprintf("failed to register tool function: %v", err))
+	}
+}
+
+// Backward compatibility
+type FluentTool = Builder
+
+// RegisterQuick registers a simple tool with auto-generated schema
+func (r *Registry) RegisterQuick(name string, fn func(ctx context.Context, params map[string]any) (any, error)) error {
+	return r.Register(&funcTool{
+		name:        name,
+		description: "Auto-registered tool: " + name,
+		parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+		execute: fn,
+	})
 }

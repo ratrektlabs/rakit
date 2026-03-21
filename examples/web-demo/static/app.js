@@ -19,10 +19,10 @@ const sidebar = document.getElementById('sidebar');
 const sidebarOverlay = document.getElementById('sidebarOverlay');
 
 const providerModels = {
-    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-    anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
-    gemini: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'],
-    zai: ['zai-1']
+    openai: ['gpt-4.5-turbo', 'gpt-4o', 'gpt-4o-mini', 'o3-mini', 'o1-mini'],
+    anthropic: ['claude-3.7-sonnet', 'claude-3.5-sonnet', 'claude-3-opus', 'claude-3-haiku'],
+    gemini: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+    zai: ['zai-1', 'zai-turbo', 'glm-4-plus', 'glm-z1-air']
 };
 
 function generateSessionId() {

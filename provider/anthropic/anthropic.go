@@ -29,7 +29,7 @@ func NewProvider(config provider.ProviderConfig) *AnthropicProvider {
 
 	model := config.Model
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = "claude-3.7-sonnet"
 	}
 
 	return &AnthropicProvider{

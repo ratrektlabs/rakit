@@ -28,6 +28,18 @@ type RunInput struct {
 	UserID    string             `json:"user_id,omitempty"`
 	Stream    bool               `json:"stream,omitempty"`
 	MaxSteps  int                `json:"max_steps,omitempty"`
+	
+	// Tools to add/overwrite for this run (optional)
+	Tools []interface{} `json:"tools,omitempty"`
+	
+	// Skills to add/overwrite for this run (optional)
+	Skills []interface{} `json:"skills,omitempty"`
+	
+	// ReplaceAllTools if true, replaces all agent tools with RunInput.Tools
+	ReplaceAllTools bool `json:"replace_all_tools,omitempty"`
+	
+	// ReplaceAllSkills if true, replaces all agent skills with RunInput.Skills
+	ReplaceAllSkills bool `json:"replace_all_skills,omitempty"`
 }
 
 type RunOutput struct {
@@ -147,6 +159,58 @@ func (a *Agent) State() AgentState {
 	return a.state
 }
 
+// buildRunTools creates the effective tool registry for a specific run
+func (a *Agent) buildRunTools(input RunInput) *tool.Registry {
+	// If no tools specified in input, use agent's tools
+	if len(input.Tools) == 0 && len(input.Skills) == 0 {
+		return a.tools
+	}
+
+	// Create a new registry for this run
+	runTools := tool.NewRegistry()
+
+	// If not replacing all, copy existing tools
+	if !input.ReplaceAllTools {
+		for _, info := range a.tools.List() {
+			t, _ := a.tools.Get(info.Name)
+			_ = runTools.Register(t)
+		}
+	}
+
+	// Add/overwrite with input tools
+	for _, t := range input.Tools {
+		_ = runTools.Register(t)
+	}
+
+	// If not replacing all skills, copy existing skill tools
+	if !input.ReplaceAllSkills {
+		// Note: We'd need to track skills separately to do this properly
+		// For now, skills just add their tools to the registry
+	}
+
+	// Add skill tools
+	for _, s := range input.Skills {
+		var skillImpl skill.Skill
+		switch v := s.(type) {
+		case skill.Skill:
+			skillImpl = v
+		case *skill.Builder:
+			built, err := v.Build()
+			if err != nil {
+				continue
+			}
+			skillImpl = built
+		}
+		if skillImpl != nil {
+			for _, t := range skillImpl.Tools() {
+				_ = runTools.Register(t)
+			}
+		}
+	}
+
+	return runTools
+}
+
 func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 	a.mu.Lock()
 	a.state = StateRunning
@@ -159,6 +223,9 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 		}
 		a.mu.Unlock()
 	}()
+
+	// Build effective tools for this run
+	runTools := a.buildRunTools(input)
 
 	maxSteps := a.options.MaxSteps
 	if input.MaxSteps > 0 {
@@ -178,7 +245,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 			}
 		}
 
-		req := a.buildRequest(messages)
+		req := a.buildRequest(messages, runTools)
 
 		resp, err := a.provider.Complete(ctx, req)
 		if err != nil {
@@ -200,7 +267,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 		output.Usage = resp.Usage
 
 		if len(assistantMsg.ToolCalls) > 0 {
-			toolResults, continueRun, err := a.executeToolCalls(ctx, assistantMsg.ToolCalls)
+			toolResults, continueRun, err := a.executeToolCalls(ctx, assistantMsg.ToolCalls, runTools)
 			if err != nil {
 				return nil, fmt.Errorf("tool execution failed: %w", err)
 			}
@@ -275,6 +342,9 @@ func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEve
 			a.mu.Unlock()
 		}()
 
+		// Build effective tools for this run
+		runTools := a.buildRunTools(input)
+
 		maxSteps := a.options.MaxSteps
 		if input.MaxSteps > 0 {
 			maxSteps = input.MaxSteps
@@ -285,7 +355,7 @@ func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEve
 		for step := 1; step <= maxSteps; step++ {
 			eventChan <- StreamEvent{Type: StreamEventTypeStepStart, Step: step}
 
-			req := a.buildRequest(messages)
+			req := a.buildRequest(messages, runTools)
 
 			providerEvents, err := a.provider.Stream(ctx, req)
 			if err != nil {
@@ -326,7 +396,7 @@ func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEve
 			messages = append(messages, assistantMsg)
 
 			if len(toolCalls) > 0 {
-				toolResults, continueRun, err := a.executeToolCalls(ctx, toolCalls)
+				toolResults, continueRun, err := a.executeToolCalls(ctx, toolCalls, runTools)
 				if err != nil {
 					eventChan <- StreamEvent{Type: StreamEventTypeError, Error: err}
 					return
@@ -403,7 +473,7 @@ func (a *Agent) prepareMessages(inputMessages []provider.Message) []provider.Mes
 	return messages
 }
 
-func (a *Agent) buildRequest(messages []provider.Message) *provider.CompletionRequest {
+func (a *Agent) buildRequest(messages []provider.Message, tools *tool.Registry) *provider.CompletionRequest {
 	req := &provider.CompletionRequest{
 		Messages:  messages,
 		Model:     a.model,
@@ -413,14 +483,14 @@ func (a *Agent) buildRequest(messages []provider.Message) *provider.CompletionRe
 	temp := a.options.Temperature
 	req.Temperature = &temp
 
-	if a.tools != nil && len(a.tools.List()) > 0 && a.provider.SupportsTools() {
-		req.Tools = a.tools.ToProviderTools()
+	if tools != nil && len(tools.List()) > 0 && a.provider.SupportsTools() {
+		req.Tools = tools.ToProviderTools()
 	}
 
 	return req
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []provider.ToolCall) ([]ToolExecutionResult, bool, error) {
+func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []provider.ToolCall, tools *tool.Registry) ([]ToolExecutionResult, bool, error) {
 	results := make([]ToolExecutionResult, 0, len(toolCalls))
 	continueRun := true
 

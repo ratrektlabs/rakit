@@ -101,8 +101,13 @@ var sessionManager = NewSessionManager()
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8081"
 	}
+
+	if err := InitModelDB("./data/models.db"); err != nil {
+		log.Fatalf("Failed to initialize model database: %v", err)
+	}
+	defer modelDB.Close()
 
 	mux := http.NewServeMux()
 
@@ -110,6 +115,8 @@ func main() {
 	mux.HandleFunc("/api/stream", handleStream)
 	mux.HandleFunc("/api/providers", handleProviders)
 	mux.HandleFunc("/api/models", handleModels)
+	mux.HandleFunc("/api/models/", handleModelByID)
+	mux.HandleFunc("/api/models/seed", handleSeedModels)
 	mux.HandleFunc("/api/session", handleSession)
 	mux.HandleFunc("/api/tools", handleTools)
 	mux.HandleFunc("/api/health", handleHealth)
@@ -127,7 +134,7 @@ func main() {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == http.MethodOptions {
@@ -301,33 +308,146 @@ type ProviderInfo struct {
 }
 
 func handleProviders(w http.ResponseWriter, r *http.Request) {
-	providers := []ProviderInfo{
-		{Name: "openai", Models: []string{"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"}},
-		{Name: "anthropic", Models: []string{"claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"}},
-		{Name: "gemini", Models: []string{"gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"}},
-		{Name: "zai", Models: []string{"zai-1"}},
+	models, err := modelDB.GetAll("")
+	if err != nil {
+		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
 	}
+
+	providerMap := make(map[string][]string)
+	for _, m := range models {
+		providerMap[m.Provider] = append(providerMap[m.Provider], m.ModelID)
+	}
+
+	var providers []ProviderInfo
+	for name, modelIDs := range providerMap {
+		providers = append(providers, ProviderInfo{Name: name, Models: modelIDs})
+	}
+
 	writeJSON(w, providers, http.StatusOK)
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
-	prov := r.URL.Query().Get("provider")
-	models := []string{}
-
-	switch prov {
-	case "openai":
-		models = []string{"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"}
-	case "anthropic":
-		models = []string{"claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"}
-	case "gemini":
-		models = []string{"gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"}
-	case "zai":
-		models = []string{"zai-1"}
+	switch r.Method {
+	case http.MethodGet:
+		listModels(w, r)
+	case http.MethodPost:
+		createModel(w, r)
 	default:
-		models = []string{}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func listModels(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	models, err := modelDB.GetAll(provider)
+	if err != nil {
+		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"models": models}, http.StatusOK)
+}
+
+type CreateModelRequest struct {
+	Provider    string `json:"provider"`
+	ModelID     string `json:"model_id"`
+	DisplayName string `json:"display_name"`
+	IsDefault   bool   `json:"is_default"`
+}
+
+func createModel(w http.ResponseWriter, r *http.Request) {
+	var req CreateModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, map[string]string{"error": "Invalid request body"}, http.StatusBadRequest)
+		return
 	}
 
-	writeJSON(w, map[string][]string{"models": models}, http.StatusOK)
+	if req.Provider == "" || req.ModelID == "" || req.DisplayName == "" {
+		writeJSON(w, map[string]string{"error": "provider, model_id, and display_name are required"}, http.StatusBadRequest)
+		return
+	}
+
+	m := Model{
+		Provider:    req.Provider,
+		ModelID:     req.ModelID,
+		DisplayName: req.DisplayName,
+		IsDefault:   req.IsDefault,
+	}
+
+	if err := modelDB.Create(m); err != nil {
+		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "created"}, http.StatusCreated)
+}
+
+func handleModelByID(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		writeJSON(w, map[string]string{"error": "Missing model ID"}, http.StatusBadRequest)
+		return
+	}
+
+	var id int64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		writeJSON(w, map[string]string{"error": "Invalid model ID"}, http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		updateModel(w, r, id)
+	case http.MethodDelete:
+		deleteModel(w, r, id)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func updateModel(w http.ResponseWriter, r *http.Request, id int64) {
+	var req CreateModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, map[string]string{"error": "Invalid request body"}, http.StatusBadRequest)
+		return
+	}
+
+	m := Model{
+		Provider:    req.Provider,
+		ModelID:     req.ModelID,
+		DisplayName: req.DisplayName,
+		IsDefault:   req.IsDefault,
+	}
+
+	if err := modelDB.Update(id, m); err != nil {
+		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "updated"}, http.StatusOK)
+}
+
+func deleteModel(w http.ResponseWriter, r *http.Request, id int64) {
+	if err := modelDB.Delete(id); err != nil {
+		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "deleted"}, http.StatusOK)
+}
+
+func handleSeedModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := modelDB.SeedDefaults(); err != nil {
+		writeJSON(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "seeded"}, http.StatusOK)
 }
 
 type SessionRequest struct {

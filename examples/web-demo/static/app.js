@@ -3,6 +3,7 @@ const API_BASE = '/api';
 let sessionId = generateSessionId();
 let isStreaming = false;
 let messages = [];
+let providerModels = {};
 
 const providerSelect = document.getElementById('provider');
 const modelSelect = document.getElementById('model');
@@ -18,23 +19,44 @@ const menuBtn = document.getElementById('menuBtn');
 const sidebar = document.getElementById('sidebar');
 const sidebarOverlay = document.getElementById('sidebarOverlay');
 
-const providerModels = {
-    openai: ['gpt-4.5-turbo', 'gpt-4o', 'gpt-4o-mini', 'o3-mini', 'o1-mini'],
-    anthropic: ['claude-3.7-sonnet', 'claude-3.5-sonnet', 'claude-3-opus', 'claude-3-haiku'],
-    gemini: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
-    zai: ['zai-1', 'zai-turbo', 'glm-4-plus', 'glm-z1-air']
-};
-
 function generateSessionId() {
     return 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 }
 
 function init() {
+    loadModels();
     loadSettings();
-    updateModelOptions();
     loadTools();
     setupEventListeners();
     updateInputState();
+}
+
+async function loadModels() {
+    try {
+        const response = await fetch(`${API_BASE}/models`);
+        const data = await response.json();
+        
+        providerModels = {};
+        if (data.models) {
+            data.models.forEach(model => {
+                if (!providerModels[model.provider]) {
+                    providerModels[model.provider] = [];
+                }
+                providerModels[model.provider].push(model.model_id);
+            });
+        }
+        
+        updateModelOptions();
+    } catch (error) {
+        console.error('Failed to load models:', error);
+        providerModels = {
+            openai: ['gpt-4o', 'gpt-4o-mini'],
+            anthropic: ['claude-3.5-sonnet', 'claude-3-haiku'],
+            gemini: ['gemini-1.5-pro', 'gemini-1.5-flash'],
+            zai: ['zai-1']
+        };
+        updateModelOptions();
+    }
 }
 
 function loadSettings() {

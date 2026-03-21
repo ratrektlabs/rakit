@@ -22,24 +22,60 @@ const (
 	StateError    AgentState = "error"
 )
 
-type RunInput struct {
-	Messages  []provider.Message `json:"messages"`
-	SessionID string             `json:"session_id,omitempty"`
-	UserID    string             `json:"user_id,omitempty"`
-	Stream    bool               `json:"stream,omitempty"`
-	MaxSteps  int                `json:"max_steps,omitempty"`
-	
-	// Tools to add/overwrite for this run (optional)
-	Tools []interface{} `json:"tools,omitempty"`
-	
-	// Skills to add/overwrite for this run (optional)
-	Skills []interface{} `json:"skills,omitempty"`
-	
-	// ReplaceAllTools if true, replaces all agent tools with RunInput.Tools
-	ReplaceAllTools bool `json:"replace_all_tools,omitempty"`
-	
-	// ReplaceAllSkills if true, replaces all agent skills with RunInput.Skills
-	ReplaceAllSkills bool `json:"replace_all_skills,omitempty"`
+type RunInput = []provider.Message
+
+type runConfig struct {
+	sessionID        string
+	userID           string
+	maxSteps         int
+	tools            []interface{}
+	skills           []interface{}
+	replaceAllTools  bool
+	replaceAllSkills bool
+}
+
+type RunOption func(*runConfig)
+
+func WithSession(sessionID string) RunOption {
+	return func(c *runConfig) {
+		c.sessionID = sessionID
+	}
+}
+
+func WithUser(userID string) RunOption {
+	return func(c *runConfig) {
+		c.userID = userID
+	}
+}
+
+func WithTools(tools ...interface{}) RunOption {
+	return func(c *runConfig) {
+		c.tools = append(c.tools, tools...)
+	}
+}
+
+func WithSkills(skills ...interface{}) RunOption {
+	return func(c *runConfig) {
+		c.skills = append(c.skills, skills...)
+	}
+}
+
+func WithRunMaxSteps(steps int) RunOption {
+	return func(c *runConfig) {
+		c.maxSteps = steps
+	}
+}
+
+func ReplaceAllTools() RunOption {
+	return func(c *runConfig) {
+		c.replaceAllTools = true
+	}
+}
+
+func ReplaceAllSkills() RunOption {
+	return func(c *runConfig) {
+		c.replaceAllSkills = true
+	}
 }
 
 type RunOutput struct {
@@ -61,6 +97,7 @@ type Agent struct {
 	mu       sync.RWMutex
 	provider provider.Provider
 	tools    *tool.Registry
+	skills   *skill.Registry
 	memory   memory.Memory
 	model    string
 	state    AgentState
@@ -127,6 +164,7 @@ func New(p provider.Provider, opts ...Option) *Agent {
 	return &Agent{
 		provider: p,
 		tools:    tool.NewRegistry(),
+		skills:   skill.NewRegistry(),
 		state:    StateIdle,
 		options:  options,
 	}
@@ -159,39 +197,39 @@ func (a *Agent) State() AgentState {
 	return a.state
 }
 
-// buildRunTools creates the effective tool registry for a specific run
-func (a *Agent) buildRunTools(input RunInput) *tool.Registry {
-	// If no tools specified in input, use agent's tools
-	if len(input.Tools) == 0 && len(input.Skills) == 0 {
+func (a *Agent) buildRunTools(cfg runConfig) *tool.Registry {
+	if len(cfg.tools) == 0 && len(cfg.skills) == 0 {
 		return a.tools
 	}
 
-	// Create a new registry for this run
 	runTools := tool.NewRegistry()
 
-	// If not replacing all, copy existing tools
-	if !input.ReplaceAllTools {
+	if !cfg.replaceAllTools {
 		for _, info := range a.tools.List() {
 			t, _ := a.tools.Get(info.Name)
 			_ = runTools.Register(t)
 		}
 	}
 
-	// Add/overwrite with input tools
-	for _, t := range input.Tools {
+	for _, t := range cfg.tools {
+		// Handle string names (lookup from agent's registry)
+		if name, ok := t.(string); ok {
+			if existing, err := a.tools.Get(name); err == nil {
+				_ = runTools.Register(existing)
+			}
+			continue
+		}
 		_ = runTools.Register(t)
 	}
 
-	// If not replacing all skills, copy existing skill tools
-	if !input.ReplaceAllSkills {
-		// Note: We'd need to track skills separately to do this properly
-		// For now, skills just add their tools to the registry
-	}
-
-	// Add skill tools
-	for _, s := range input.Skills {
+	for _, s := range cfg.skills {
 		var skillImpl skill.Skill
 		switch v := s.(type) {
+		case string:
+			// Lookup from agent's skill registry
+			if existing, err := a.skills.Get(v); err == nil {
+				skillImpl = existing
+			}
 		case skill.Skill:
 			skillImpl = v
 		case *skill.Builder:
@@ -211,7 +249,12 @@ func (a *Agent) buildRunTools(input RunInput) *tool.Registry {
 	return runTools
 }
 
-func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
+func (a *Agent) Run(ctx context.Context, messages RunInput, opts ...RunOption) (*RunOutput, error) {
+	cfg := &runConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	a.mu.Lock()
 	a.state = StateRunning
 	a.mu.Unlock()
@@ -224,15 +267,14 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 		a.mu.Unlock()
 	}()
 
-	// Build effective tools for this run
-	runTools := a.buildRunTools(input)
+	runTools := a.buildRunTools(*cfg)
 
 	maxSteps := a.options.MaxSteps
-	if input.MaxSteps > 0 {
-		maxSteps = input.MaxSteps
+	if cfg.maxSteps > 0 {
+		maxSteps = cfg.maxSteps
 	}
 
-	messages := a.prepareMessages(input.Messages)
+	preparedMessages := a.prepareMessages(messages)
 
 	output := &RunOutput{
 		State: StateRunning,
@@ -240,12 +282,12 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 
 	for step := 1; step <= maxSteps; step++ {
 		if a.options.Hooks.BeforeStep != nil {
-			if err := a.options.Hooks.BeforeStep(ctx, step, messages); err != nil {
+			if err := a.options.Hooks.BeforeStep(ctx, step, preparedMessages); err != nil {
 				return nil, fmt.Errorf("before step hook failed: %w", err)
 			}
 		}
 
-		req := a.buildRequest(messages, runTools)
+		req := a.buildRequest(preparedMessages, runTools)
 
 		resp, err := a.provider.Complete(ctx, req)
 		if err != nil {
@@ -260,7 +302,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 		}
 
 		assistantMsg := resp.Choices[0].Message
-		messages = append(messages, assistantMsg)
+		preparedMessages = append(preparedMessages, assistantMsg)
 
 		output.Message = assistantMsg
 		output.Steps = step
@@ -289,7 +331,7 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 					resultContent = result.Error
 				}
 
-				messages = append(messages, provider.Message{
+				preparedMessages = append(preparedMessages, provider.Message{
 					Role:       provider.RoleTool,
 					Content:    resultContent,
 					ToolCallID: result.ToolName,
@@ -307,22 +349,27 @@ func (a *Agent) Run(ctx context.Context, input RunInput) (*RunOutput, error) {
 		}
 	}
 
-	if a.memory != nil && input.UserID != "" && input.SessionID != "" {
-		for _, msg := range messages {
+	if a.memory != nil && cfg.userID != "" && cfg.sessionID != "" {
+		for _, msg := range preparedMessages {
 			entry := memory.Entry{
 				Role:    string(msg.Role),
 				Content: msg.Content,
 			}
-			_ = a.memory.Add(ctx, input.UserID, input.SessionID, entry)
+			_ = a.memory.Add(ctx, cfg.userID, cfg.sessionID, entry)
 		}
 	}
 
 	return output, nil
 }
 
-func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEvent, error) {
+func (a *Agent) RunStream(ctx context.Context, messages RunInput, opts ...RunOption) (<-chan StreamEvent, error) {
 	if !a.provider.SupportsStreaming() {
 		return nil, errors.New("provider does not support streaming")
+	}
+
+	cfg := &runConfig{}
+	for _, opt := range opts {
+		opt(cfg)
 	}
 
 	eventChan := make(chan StreamEvent, 100)
@@ -342,20 +389,19 @@ func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEve
 			a.mu.Unlock()
 		}()
 
-		// Build effective tools for this run
-		runTools := a.buildRunTools(input)
+		runTools := a.buildRunTools(*cfg)
 
 		maxSteps := a.options.MaxSteps
-		if input.MaxSteps > 0 {
-			maxSteps = input.MaxSteps
+		if cfg.maxSteps > 0 {
+			maxSteps = cfg.maxSteps
 		}
 
-		messages := a.prepareMessages(input.Messages)
+		preparedMessages := a.prepareMessages(messages)
 
 		for step := 1; step <= maxSteps; step++ {
 			eventChan <- StreamEvent{Type: StreamEventTypeStepStart, Step: step}
 
-			req := a.buildRequest(messages, runTools)
+			req := a.buildRequest(preparedMessages, runTools)
 
 			providerEvents, err := a.provider.Stream(ctx, req)
 			if err != nil {
@@ -393,7 +439,7 @@ func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEve
 				Content:   fullContent,
 				ToolCalls: toolCalls,
 			}
-			messages = append(messages, assistantMsg)
+			preparedMessages = append(preparedMessages, assistantMsg)
 
 			if len(toolCalls) > 0 {
 				toolResults, continueRun, err := a.executeToolCalls(ctx, toolCalls, runTools)
@@ -417,7 +463,7 @@ func (a *Agent) RunStream(ctx context.Context, input RunInput) (<-chan StreamEve
 						resultContent = result.Error
 					}
 
-					messages = append(messages, provider.Message{
+					preparedMessages = append(preparedMessages, provider.Message{
 						Role:       provider.RoleTool,
 						Content:    resultContent,
 						ToolCallID: result.ToolName,
@@ -691,8 +737,6 @@ func (b *Builder) WithSkill(s interface{}) *Builder {
 	return b
 }
 
-
-
 func (b *Builder) WithMemory(m memory.Memory) *Builder {
 	b.memory = m
 	return b
@@ -742,7 +786,13 @@ func (a *Agent) AddSkill(s interface{}) error {
 	default:
 		return errors.New("invalid skill type")
 	}
-	
+
+	// Register in skills registry for lookup by name
+	if err := a.skills.Register(skillImpl); err != nil {
+		return err
+	}
+
+	// Register all tools from skill
 	for _, t := range skillImpl.Tools() {
 		if err := a.tools.Register(t); err != nil {
 			return err

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0f0f0f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>RL-Agent Web Demo</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+    <div class="app-container">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1>RL-Agent</h1>
+                <span class="version">Web Demo</span>
+            </div>
+            
+            <div class="settings-section">
+                <h3>Configuration</h3>
+                
+                <div class="form-group">
+                    <label for="provider">Provider</label>
+                    <select id="provider">
+                        <option value="openai">OpenAI</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="gemini">Gemini</option>
+                        <option value="zai">ZAI</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="model">Model</label>
+                    <select id="model">
+                        <option value="gpt-4o">gpt-4o</option>
+                        <option value="gpt-4o-mini">gpt-4o-mini</option>
+                        <option value="gpt-4-turbo">gpt-4-turbo</option>
+                        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="apiKey">API Key</label>
+                    <input type="password" id="apiKey" placeholder="Enter your API key" autocomplete="off">
+                    <small>Your API key is stored locally</small>
+                </div>
+            </div>
+            
+            <div class="tools-section">
+                <h3>Available Tools</h3>
+                <div id="toolsList" class="tools-list"></div>
+            </div>
+            
+            <div class="sidebar-footer">
+                <button id="newChatBtn" class="btn btn-primary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                    New Chat
+                </button>
+            </div>
+        </aside>
+        
+        <main class="chat-container">
+            <div class="chat-header">
+                <div class="header-actions">
+                    <button class="menu-btn" id="menuBtn" aria-label="Open menu">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="3" y1="12" x2="21" y2="12"></line>
+                            <line x1="3" y1="6" x2="21" y2="6"></line>
+                            <line x1="3" y1="18" x2="21" y2="18"></line>
+                        </svg>
+                    </button>
+                    <h2 id="chatTitle">New Conversation</h2>
+                </div>
+                <div class="header-actions">
+                    <span id="connectionStatus" class="status-badge connected">Connected</span>
+                </div>
+            </div>
+            
+            <div id="messagesContainer" class="messages-container">
+                <div class="welcome-message">
+                    <div class="welcome-icon">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"></path>
+                            <path d="M12 6v6l4 2"></path>
+                        </svg>
+                    </div>
+                    <h2>Welcome to RL-Agent</h2>
+                    <p>Configure your provider and API key to start chatting.</p>
+                    <div class="features-list">
+                        <div class="feature">
+                            <span class="feature-icon">💬</span>
+                            <span>Real-time streaming responses</span>
+                        </div>
+                        <div class="feature">
+                            <span class="feature-icon">🔧</span>
+                            <span>Tool calling support</span>
+                        </div>
+                        <div class="feature">
+                            <span class="feature-icon">🔒</span>
+                            <span>API keys stored locally</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <textarea 
+                        id="messageInput" 
+                        placeholder="Type your message..." 
+                        rows="1"
+                        disabled
+                    ></textarea>
+                    <button id="sendBtn" class="send-btn" disabled aria-label="Send message">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="/app.js"></script>
+</body>
+</html>

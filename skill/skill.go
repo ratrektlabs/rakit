@@ -9,11 +9,47 @@ import (
 	"github.com/ratrektlabs/rl-agent/tool"
 )
 
+type ApplicationCommandOptionType int
+
+const (
+	OptionTypeString ApplicationCommandOptionType = iota + 1
+	OptionTypeInteger
+	OptionTypeBoolean
+	OptionTypeUser
+	OptionTypeChannel
+	OptionTypeRole
+	OptionTypeMentionable
+	OptionTypeNumber
+	OptionTypeAttachment
+)
+
+type SlashCommandChoice struct {
+	Name  string      `json:"name"`
+	Value interface{} `json:"value"`
+}
+
+type SlashCommandOption struct {
+	Name        string                       `json:"name"`
+	Description string                       `json:"description"`
+	Type        ApplicationCommandOptionType `json:"type"`
+	Required    bool                         `json:"required"`
+	Choices     []SlashCommandChoice         `json:"choices,omitempty"`
+}
+
+type SlashCommandDefinition struct {
+	Name              string               `json:"name"`
+	Description       string               `json:"description"`
+	Options           []SlashCommandOption `json:"options,omitempty"`
+	DefaultPermission bool                 `json:"default_permission"`
+	NSFW              bool                 `json:"nsfw"`
+}
+
 type Skill interface {
 	Name() string
 	Description() string
 	Tools() []tool.Tool
 	Instructions() string
+	SlashCommand() *SlashCommandDefinition
 }
 
 type skillImpl struct {
@@ -21,6 +57,7 @@ type skillImpl struct {
 	description  string
 	tools        []tool.Tool
 	instructions string
+	slashCommand *SlashCommandDefinition
 }
 
 func (s *skillImpl) Name() string {
@@ -39,11 +76,16 @@ func (s *skillImpl) Instructions() string {
 	return s.instructions
 }
 
+func (s *skillImpl) SlashCommand() *SlashCommandDefinition {
+	return s.slashCommand
+}
+
 type Builder struct {
 	name         string
 	description  string
 	tools        []tool.Tool
 	instructions string
+	slashCommand *SlashCommandDefinition
 }
 
 func New(name string) *Builder {
@@ -73,6 +115,58 @@ func (s *Builder) WithInstruction(instruction string) *Builder {
 	return s
 }
 
+func (s *Builder) AsSlashCommand(name, description string) *Builder {
+	s.slashCommand = &SlashCommandDefinition{
+		Name:              name,
+		Description:       description,
+		DefaultPermission: true,
+	}
+	return s
+}
+
+func (s *Builder) WithSlashOption(name, description string, optionType ApplicationCommandOptionType, required bool) *Builder {
+	if s.slashCommand == nil {
+		return s
+	}
+	s.slashCommand.Options = append(s.slashCommand.Options, SlashCommandOption{
+		Name:        name,
+		Description: description,
+		Type:        optionType,
+		Required:    required,
+	})
+	return s
+}
+
+func (s *Builder) WithSlashChoice(optionName string, choiceName string, choiceValue interface{}) *Builder {
+	if s.slashCommand == nil {
+		return s
+	}
+	for i, opt := range s.slashCommand.Options {
+		if opt.Name == optionName {
+			s.slashCommand.Options[i].Choices = append(opt.Choices, SlashCommandChoice{
+				Name:  choiceName,
+				Value: choiceValue,
+			})
+			break
+		}
+	}
+	return s
+}
+
+func (s *Builder) WithSlashDefaultPermission(defaultPerm bool) *Builder {
+	if s.slashCommand != nil {
+		s.slashCommand.DefaultPermission = defaultPerm
+	}
+	return s
+}
+
+func (s *Builder) WithSlashNSFW(nsfw bool) *Builder {
+	if s.slashCommand != nil {
+		s.slashCommand.NSFW = nsfw
+	}
+	return s
+}
+
 func (s *Builder) Build() (Skill, error) {
 	if s.name == "" {
 		return nil, errors.New("skill name is required")
@@ -82,6 +176,7 @@ func (s *Builder) Build() (Skill, error) {
 		description:  s.description,
 		tools:        s.tools,
 		instructions: s.instructions,
+		slashCommand: s.slashCommand,
 	}, nil
 }
 
@@ -209,6 +304,7 @@ type FuncSkill struct {
 	description  string
 	tools        []tool.Tool
 	instructions string
+	slashCommand *SlashCommandDefinition
 }
 
 func NewFuncSkill(name string, fn func(ctx context.Context, params map[string]any) (any, error)) *FuncSkill {
@@ -244,6 +340,7 @@ func (s *FuncSkill) Skill() Skill {
 		description:  s.description,
 		tools:        s.tools,
 		instructions: s.instructions,
+		slashCommand: s.slashCommand,
 	}
 }
 

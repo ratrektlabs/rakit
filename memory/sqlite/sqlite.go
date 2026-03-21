@@ -18,10 +18,14 @@ type Backend struct {
 	db   *sql.DB
 	path string
 
-	stmtAdd    *sql.Stmt
-	stmtGet    *sql.Stmt
-	stmtSearch *sql.Stmt
-	stmtClear  *sql.Stmt
+	stmtAdd       *sql.Stmt
+	stmtGet       *sql.Stmt
+	stmtSearch    *sql.Stmt
+	stmtClear     *sql.Stmt
+	stmtGetAll    *sql.Stmt
+	stmtCount     *sql.Stmt
+	stmtDeleteOld *sql.Stmt
+	stmtArchive   *sql.Stmt
 }
 
 func New(path string) *Backend {
@@ -74,10 +78,23 @@ func (b *Backend) migrate(ctx context.Context) error {
 		created_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS memory_entries_archive (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		type TEXT,
+		role TEXT NOT NULL,
+		content TEXT NOT NULL,
+		metadata TEXT,
+		created_at DATETIME NOT NULL,
+		archived_at DATETIME NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_memory_entries_user_id ON memory_entries(user_id);
 	CREATE INDEX IF NOT EXISTS idx_memory_entries_session_id ON memory_entries(session_id);
 	CREATE INDEX IF NOT EXISTS idx_memory_entries_created_at ON memory_entries(created_at);
 	CREATE INDEX IF NOT EXISTS idx_memory_entries_user_session ON memory_entries(user_id, session_id);
+	CREATE INDEX IF NOT EXISTS idx_archive_user_session ON memory_entries_archive(user_id, session_id);
 	`
 
 	_, err := b.db.ExecContext(ctx, schema)
@@ -125,6 +142,52 @@ func (b *Backend) prepareStatements(ctx context.Context) error {
 		return fmt.Errorf("failed to prepare clear statement: %w", err)
 	}
 
+	b.stmtGetAll, err = b.db.PrepareContext(ctx, `
+		SELECT id, type, role, content, metadata, created_at
+		FROM memory_entries
+		WHERE user_id = ? AND session_id = ?
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare get all statement: %w", err)
+	}
+
+	b.stmtCount, err = b.db.PrepareContext(ctx, `
+		SELECT COUNT(*) FROM memory_entries
+		WHERE user_id = ? AND session_id = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare count statement: %w", err)
+	}
+
+	b.stmtDeleteOld, err = b.db.PrepareContext(ctx, `
+		DELETE FROM memory_entries
+		WHERE user_id = ? AND session_id = ? AND id IN (
+			SELECT id FROM memory_entries
+			WHERE user_id = ? AND session_id = ?
+			ORDER BY created_at ASC
+			LIMIT ?
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare delete old statement: %w", err)
+	}
+
+	b.stmtArchive, err = b.db.PrepareContext(ctx, `
+		INSERT INTO memory_entries_archive (id, user_id, session_id, type, role, content, metadata, created_at, archived_at)
+		SELECT id, user_id, session_id, type, role, content, metadata, created_at, ?
+		FROM memory_entries
+		WHERE user_id = ? AND session_id = ? AND id IN (
+			SELECT id FROM memory_entries
+			WHERE user_id = ? AND session_id = ?
+			ORDER BY created_at ASC
+			LIMIT ?
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare archive statement: %w", err)
+	}
+
 	return nil
 }
 
@@ -143,6 +206,18 @@ func (b *Backend) Close() error {
 	}
 	if b.stmtClear != nil {
 		b.stmtClear.Close()
+	}
+	if b.stmtGetAll != nil {
+		b.stmtGetAll.Close()
+	}
+	if b.stmtCount != nil {
+		b.stmtCount.Close()
+	}
+	if b.stmtDeleteOld != nil {
+		b.stmtDeleteOld.Close()
+	}
+	if b.stmtArchive != nil {
+		b.stmtArchive.Close()
 	}
 
 	if b.db != nil {
@@ -291,6 +366,217 @@ func (m *sqliteMemory) Clear(ctx context.Context, userID, sessionID string) erro
 	}
 
 	return nil
+}
+
+func (m *sqliteMemory) GetAll(ctx context.Context, userID, sessionID string) ([]memory.Entry, error) {
+	m.backend.mu.RLock()
+	defer m.backend.mu.RUnlock()
+
+	rows, err := m.backend.stmtGetAll.QueryContext(ctx, userID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []memory.Entry
+	for rows.Next() {
+		entry, err := m.scanEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	return entries, nil
+}
+
+func (m *sqliteMemory) Count(ctx context.Context, userID, sessionID string) (int, error) {
+	m.backend.mu.RLock()
+	defer m.backend.mu.RUnlock()
+
+	var count int
+	err := m.backend.stmtCount.QueryRowContext(ctx, userID, sessionID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count entries: %w", err)
+	}
+
+	return count, nil
+}
+
+func (m *sqliteMemory) Compact(ctx context.Context, userID, sessionID string, opts memory.CompactionOptions) (*memory.CompactionStats, error) {
+	start := time.Now()
+	stats := &memory.CompactionStats{Strategy: opts.Strategy}
+
+	entries, err := m.GetAll(ctx, userID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	stats.EntriesBefore = len(entries)
+	stats.BytesBefore = calculateTotalBytes(entries)
+
+	if len(entries) == 0 {
+		stats.EntriesAfter = 0
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	keepRecent := opts.KeepRecent
+	if keepRecent <= 0 {
+		keepRecent = opts.MaxEntries
+	}
+	if keepRecent <= 0 {
+		keepRecent = len(entries)
+	}
+
+	var toCompactCount int
+	if keepRecent < len(entries) {
+		toCompactCount = len(entries) - keepRecent
+	}
+
+	if opts.MaxAge > 0 {
+		cutoff := time.Now().Add(-opts.MaxAge)
+		for _, e := range entries {
+			if e.Timestamp.Before(cutoff) {
+				toCompactCount++
+			}
+		}
+	}
+
+	if toCompactCount == 0 {
+		stats.EntriesAfter = len(entries)
+		stats.BytesAfter = stats.BytesBefore
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	if opts.DryRun {
+		stats.EntriesAfter = len(entries) - toCompactCount
+		stats.EntriesRemoved = toCompactCount
+		var keptEntries []memory.Entry
+		if keepRecent < len(entries) {
+			keptEntries = entries[len(entries)-keepRecent:]
+		} else {
+			keptEntries = entries
+		}
+		stats.BytesAfter = calculateTotalBytes(keptEntries)
+		stats.BytesSaved = stats.BytesBefore - stats.BytesAfter
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	m.backend.mu.Lock()
+	defer m.backend.mu.Unlock()
+
+	switch opts.Strategy {
+	case memory.CompactionStrategyTruncate:
+		_, err = m.backend.stmtDeleteOld.ExecContext(ctx, userID, sessionID, userID, sessionID, toCompactCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to truncate entries: %w", err)
+		}
+		stats.EntriesRemoved = toCompactCount
+
+	case memory.CompactionStrategySummarize:
+		if toCompactCount > 0 && opts.LLMProvider != nil {
+			toCompact := entries[:toCompactCount]
+			prompt := opts.SummarizePrompt
+			if prompt == "" {
+				prompt = "Summarize the following conversation history concisely, preserving key information and decisions:"
+			}
+			summary, err := opts.LLMProvider.Summarize(ctx, toCompact, prompt)
+			if err != nil {
+				return nil, fmt.Errorf("failed to summarize entries: %w", err)
+			}
+
+			_, err = m.backend.stmtDeleteOld.ExecContext(ctx, userID, sessionID, userID, sessionID, toCompactCount)
+			if err != nil {
+				return nil, fmt.Errorf("failed to delete entries after summary: %w", err)
+			}
+
+			summaryEntry := memory.Entry{
+				ID:        generateID(),
+				Type:      memory.EntryTypeSummary,
+				Role:      "system",
+				Content:   summary,
+				Timestamp: time.Now(),
+				Metadata: map[string]interface{}{
+					"compacted_entries": len(toCompact),
+					"compaction_time":   time.Now().Format(time.RFC3339),
+				},
+			}
+
+			var metadataJSON []byte
+			if summaryEntry.Metadata != nil {
+				metadataJSON, _ = json.Marshal(summaryEntry.Metadata)
+			}
+
+			_, err = m.backend.stmtAdd.ExecContext(
+				ctx,
+				summaryEntry.ID,
+				userID,
+				sessionID,
+				summaryEntry.Type,
+				summaryEntry.Role,
+				summaryEntry.Content,
+				string(metadataJSON),
+				summaryEntry.Timestamp.UTC(),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to add summary entry: %w", err)
+			}
+			stats.EntriesSummary = toCompactCount
+		} else {
+			_, err = m.backend.stmtDeleteOld.ExecContext(ctx, userID, sessionID, userID, sessionID, toCompactCount)
+			if err != nil {
+				return nil, fmt.Errorf("failed to truncate entries: %w", err)
+			}
+			stats.EntriesRemoved = toCompactCount
+		}
+
+	case memory.CompactionStrategyArchive:
+		_, err = m.backend.stmtArchive.ExecContext(ctx, time.Now().UTC(), userID, sessionID, userID, sessionID, toCompactCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to archive entries: %w", err)
+		}
+		_, err = m.backend.stmtDeleteOld.ExecContext(ctx, userID, sessionID, userID, sessionID, toCompactCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to delete archived entries: %w", err)
+		}
+		stats.EntriesArchived = toCompactCount
+
+	default:
+		_, err = m.backend.stmtDeleteOld.ExecContext(ctx, userID, sessionID, userID, sessionID, toCompactCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to truncate entries: %w", err)
+		}
+		stats.EntriesRemoved = toCompactCount
+	}
+
+	var newCount int
+	err = m.backend.stmtCount.QueryRowContext(ctx, userID, sessionID).Scan(&newCount)
+	if err != nil {
+		newCount = len(entries) - toCompactCount
+	}
+	stats.EntriesAfter = newCount
+
+	keptEntries, _ := m.GetAll(ctx, userID, sessionID)
+	stats.BytesAfter = calculateTotalBytes(keptEntries)
+	stats.BytesSaved = stats.BytesBefore - stats.BytesAfter
+	stats.Duration = time.Since(start)
+
+	return stats, nil
+}
+
+func calculateTotalBytes(entries []memory.Entry) int64 {
+	var total int64
+	for _, e := range entries {
+		total += int64(len(e.Content))
+	}
+	return total
 }
 
 type scanner interface {

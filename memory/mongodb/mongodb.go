@@ -13,11 +13,12 @@ import (
 )
 
 type Backend struct {
-	client     *mongo.Client
-	database   *mongo.Database
-	collection *mongo.Collection
-	uri        string
-	dbName     string
+	client      *mongo.Client
+	database    *mongo.Database
+	collection  *mongo.Collection
+	archiveColl *mongo.Collection
+	uri         string
+	dbName      string
 }
 
 type Config struct {
@@ -59,6 +60,7 @@ func (b *Backend) Connect(ctx context.Context) error {
 
 	b.database = b.client.Database(b.dbName)
 	b.collection = b.database.Collection("memory_entries")
+	b.archiveColl = b.database.Collection("memory_entries_archive")
 
 	if err := b.createIndexes(ctx); err != nil {
 		return fmt.Errorf("failed to create indexes: %w", err)
@@ -88,6 +90,22 @@ func (b *Backend) createIndexes(ctx context.Context) error {
 	}
 
 	_, err := b.collection.Indexes().CreateMany(ctx, indexes)
+	if err != nil {
+		return err
+	}
+
+	archiveIndexes := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "session_id", Value: 1}},
+			Options: options.Index().SetName("idx_archive_user_session"),
+		},
+		{
+			Keys:    bson.D{{Key: "archived_at", Value: -1}},
+			Options: options.Index().SetName("idx_archived_at"),
+		},
+	}
+
+	_, err = b.archiveColl.Indexes().CreateMany(ctx, archiveIndexes)
 	return err
 }
 
@@ -263,6 +281,266 @@ func (m *mongodbMemory) Clear(ctx context.Context, userID, sessionID string) err
 	}
 
 	return nil
+}
+
+func (m *mongodbMemory) GetAll(ctx context.Context, userID, sessionID string) ([]memory.Entry, error) {
+	filter := bson.M{
+		"user_id":    userID,
+		"session_id": sessionID,
+	}
+
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}})
+
+	cursor, err := m.backend.collection.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all entries: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var mongoEntries []mongoEntry
+	if err := cursor.All(ctx, &mongoEntries); err != nil {
+		return nil, fmt.Errorf("failed to decode entries: %w", err)
+	}
+
+	entries := make([]memory.Entry, len(mongoEntries))
+	for i, me := range mongoEntries {
+		entries[i] = memory.Entry{
+			ID:        me.ID,
+			Type:      me.Type,
+			Role:      me.Role,
+			Content:   me.Content,
+			Metadata:  me.Metadata,
+			Timestamp: me.CreatedAt,
+		}
+	}
+
+	return entries, nil
+}
+
+func (m *mongodbMemory) Count(ctx context.Context, userID, sessionID string) (int, error) {
+	filter := bson.M{
+		"user_id":    userID,
+		"session_id": sessionID,
+	}
+
+	count, err := m.backend.collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count entries: %w", err)
+	}
+
+	return int(count), nil
+}
+
+func (m *mongodbMemory) Compact(ctx context.Context, userID, sessionID string, opts memory.CompactionOptions) (*memory.CompactionStats, error) {
+	start := time.Now()
+	stats := &memory.CompactionStats{Strategy: opts.Strategy}
+
+	entries, err := m.GetAll(ctx, userID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	stats.EntriesBefore = len(entries)
+	stats.BytesBefore = calculateTotalBytes(entries)
+
+	if len(entries) == 0 {
+		stats.EntriesAfter = 0
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	keepRecent := opts.KeepRecent
+	if keepRecent <= 0 {
+		keepRecent = opts.MaxEntries
+	}
+	if keepRecent <= 0 {
+		keepRecent = len(entries)
+	}
+
+	var toCompact []memory.Entry
+	var toKeep []memory.Entry
+
+	if keepRecent < len(entries) {
+		toKeep = entries[len(entries)-keepRecent:]
+		toCompact = entries[:len(entries)-keepRecent]
+	} else {
+		toKeep = entries
+		toCompact = []memory.Entry{}
+	}
+
+	if opts.MaxAge > 0 {
+		cutoff := time.Now().Add(-opts.MaxAge)
+		var filteredKeep []memory.Entry
+		for _, e := range toKeep {
+			if e.Timestamp.After(cutoff) {
+				filteredKeep = append(filteredKeep, e)
+			} else {
+				toCompact = append(toCompact, e)
+			}
+		}
+		toKeep = filteredKeep
+	}
+
+	if len(toCompact) == 0 {
+		stats.EntriesAfter = len(toKeep)
+		stats.BytesAfter = calculateTotalBytes(toKeep)
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	if opts.DryRun {
+		stats.EntriesAfter = len(toKeep)
+		stats.EntriesRemoved = len(toCompact)
+		stats.BytesAfter = calculateTotalBytes(toKeep)
+		stats.BytesSaved = stats.BytesBefore - stats.BytesAfter
+		stats.Duration = time.Since(start)
+		return stats, nil
+	}
+
+	switch opts.Strategy {
+	case memory.CompactionStrategyTruncate:
+		var idsToDelete []string
+		for _, e := range toCompact {
+			idsToDelete = append(idsToDelete, e.ID)
+		}
+		_, err = m.backend.collection.DeleteMany(ctx, bson.M{
+			"user_id":    userID,
+			"session_id": sessionID,
+			"_id":        bson.M{"$in": idsToDelete},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to truncate entries: %w", err)
+		}
+		stats.EntriesRemoved = len(toCompact)
+
+	case memory.CompactionStrategySummarize:
+		if len(toCompact) > 0 && opts.LLMProvider != nil {
+			prompt := opts.SummarizePrompt
+			if prompt == "" {
+				prompt = "Summarize the following conversation history concisely, preserving key information and decisions:"
+			}
+			summary, err := opts.LLMProvider.Summarize(ctx, toCompact, prompt)
+			if err != nil {
+				return nil, fmt.Errorf("failed to summarize entries: %w", err)
+			}
+
+			var idsToDelete []string
+			for _, e := range toCompact {
+				idsToDelete = append(idsToDelete, e.ID)
+			}
+			_, err = m.backend.collection.DeleteMany(ctx, bson.M{
+				"user_id":    userID,
+				"session_id": sessionID,
+				"_id":        bson.M{"$in": idsToDelete},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to delete entries after summary: %w", err)
+			}
+
+			summaryDoc := mongoEntry{
+				ID:        generateID(),
+				UserID:    userID,
+				SessionID: sessionID,
+				Type:      memory.EntryTypeSummary,
+				Role:      "system",
+				Content:   summary,
+				CreatedAt: time.Now().UTC(),
+				Metadata: map[string]interface{}{
+					"compacted_entries": len(toCompact),
+					"compaction_time":   time.Now().Format(time.RFC3339),
+				},
+			}
+			_, err = m.backend.collection.InsertOne(ctx, summaryDoc)
+			if err != nil {
+				return nil, fmt.Errorf("failed to add summary entry: %w", err)
+			}
+			stats.EntriesSummary = len(toCompact)
+		} else {
+			var idsToDelete []string
+			for _, e := range toCompact {
+				idsToDelete = append(idsToDelete, e.ID)
+			}
+			_, err = m.backend.collection.DeleteMany(ctx, bson.M{
+				"user_id":    userID,
+				"session_id": sessionID,
+				"_id":        bson.M{"$in": idsToDelete},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to truncate entries: %w", err)
+			}
+			stats.EntriesRemoved = len(toCompact)
+		}
+
+	case memory.CompactionStrategyArchive:
+		var archiveDocs []interface{}
+		var idsToDelete []string
+		archivedAt := time.Now().UTC()
+
+		for _, e := range toCompact {
+			archiveDocs = append(archiveDocs, bson.M{
+				"_id":         e.ID,
+				"user_id":     userID,
+				"session_id":  sessionID,
+				"type":        e.Type,
+				"role":        e.Role,
+				"content":     e.Content,
+				"metadata":    e.Metadata,
+				"created_at":  e.Timestamp.UTC(),
+				"archived_at": archivedAt,
+			})
+			idsToDelete = append(idsToDelete, e.ID)
+		}
+
+		if len(archiveDocs) > 0 {
+			_, err = m.backend.archiveColl.InsertMany(ctx, archiveDocs)
+			if err != nil {
+				return nil, fmt.Errorf("failed to archive entries: %w", err)
+			}
+
+			_, err = m.backend.collection.DeleteMany(ctx, bson.M{
+				"user_id":    userID,
+				"session_id": sessionID,
+				"_id":        bson.M{"$in": idsToDelete},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to delete archived entries: %w", err)
+			}
+		}
+		stats.EntriesArchived = len(toCompact)
+
+	default:
+		var idsToDelete []string
+		for _, e := range toCompact {
+			idsToDelete = append(idsToDelete, e.ID)
+		}
+		_, err = m.backend.collection.DeleteMany(ctx, bson.M{
+			"user_id":    userID,
+			"session_id": sessionID,
+			"_id":        bson.M{"$in": idsToDelete},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to truncate entries: %w", err)
+		}
+		stats.EntriesRemoved = len(toCompact)
+	}
+
+	newCount, _ := m.Count(ctx, userID, sessionID)
+	stats.EntriesAfter = newCount
+
+	keptEntries, _ := m.GetAll(ctx, userID, sessionID)
+	stats.BytesAfter = calculateTotalBytes(keptEntries)
+	stats.BytesSaved = stats.BytesBefore - stats.BytesAfter
+	stats.Duration = time.Since(start)
+
+	return stats, nil
+}
+
+func calculateTotalBytes(entries []memory.Entry) int64 {
+	var total int64
+	for _, e := range entries {
+		total += int64(len(e.Content))
+	}
+	return total
 }
 
 func calculateScore(content, query string) float64 {

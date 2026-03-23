@@ -1,14 +1,14 @@
 version: 1.0.0
 project:
     name: rl-agent
-    short_code: RL
-    created: 2026-03-23T14:59:28.017304866Z
-    modified: 2026-03-23T14:59:28.023081747Z
+    short_code: rl
+    created: 2026-03-23T15:24:41.229659969Z
+    modified: 2026-03-23T15:24:41.235969742Z
     version: 0.1.0
 playbook:
     name: specledger
     version: 1.0.0
-    applied_at: 2026-03-23T14:59:28.017304866Z
+    applied_at: 2026-03-23T15:24:41.229659969Z
     structure:
         - .specledger/
         - .gitattributes
@@ -17,5 +17,5 @@ playbook:
 template_version: 1.0.60
 task_tracker:
     choice: builtin
-    enabled_at: 2026-03-23T14:59:28.017304866Z
+    enabled_at: 2026-03-23T15:24:41.229659969Z
 artifact_path: specledger/

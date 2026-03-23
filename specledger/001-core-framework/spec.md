@@ -1,5 +1,10 @@
 # rl-agent v2 Specification
 
+**Feature Branch**: `001-core-framework`
+**Created**: 2025-01-15
+**Status**: Draft
+**Input**: Build lightweight agentic framework for rl-agent v2
+
 ## Overview
 
 **Name:** rl-agent
@@ -14,6 +19,138 @@
 3. **Composable** - Mix and match components as needed
 4. **Developer-first API** - Simple, intuitive, fluent
 5. **Remote-first** - Built for multi-user applications, not local assistants
+
+---
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Basic Agent Completion (Priority: P1)
+
+As a developer, I want to create an agent with a provider and get completions so I can integrate AI into my application.
+
+**Why this priority**: Core functionality - without this, nothing else works.
+
+**Independent Test**: Create agent with OpenAI provider, send message, receive response.
+
+**Acceptance Scenarios**:
+
+1. **Given** an agent configured with OpenAI provider, **When** I call `agent.Run(ctx, messages)`, **Then** I receive a `RunResult` with content
+2. **Given** an agent with system prompt, **When** I send a user message, **Then** the response respects the system prompt context
+
+---
+
+### User Story 2 - Tool Calling (Priority: P1)
+
+As a developer, I want to register tools and have the agent execute them automatically during the run loop.
+
+**Why this priority**: Tool calling is the core differentiator of agentic frameworks.
+
+**Independent Test**: Register a weather tool, ask agent about weather, verify tool was called.
+
+**Acceptance Scenarios**:
+
+1. **Given** an agent with a weather tool registered, **When** user asks "What's the weather in NYC?", **Then** the tool is called with location="NYC"
+2. **Given** tool execution fails, **When** agent runs, **Then** error is handled gracefully and returned in result
+
+---
+
+### User Story 3 - Streaming Responses (Priority: P2)
+
+As a developer, I want to stream agent responses for real-time UI updates.
+
+**Why this priority**: Essential for UX but can use non-streaming as fallback.
+
+**Independent Test**: Call `agent.Stream()`, receive SSE events, verify final content matches.
+
+**Acceptance Scenarios**:
+
+1. **Given** an agent configured for streaming, **When** I call `agent.Stream(ctx, messages)`, **Then** I receive a channel of `StreamEvent`s
+2. **Given** streaming is in progress, **When** context is cancelled, **Then** stream closes cleanly
+
+---
+
+### User Story 4 - Memory Integration (Priority: P2)
+
+As a developer, I want conversations persisted so users can continue sessions across requests.
+
+**Why this priority**: Required for multi-turn conversations but not single-shot queries.
+
+**Independent Test**: Store message, retrieve in subsequent call, verify continuity.
+
+**Acceptance Scenarios**:
+
+1. **Given** a memory backend configured, **When** agent completes a run, **Then** messages are persisted
+2. **Given** existing session history, **When** new run starts, **Then** previous context is included
+
+---
+
+### User Story 5 - HTTP API Exposure (Priority: P3)
+
+As a developer, I want to expose the agent via HTTP for web application integration.
+
+**Why this priority**: Enables web deployment but core library works without it.
+
+**Independent Test**: Start HTTP server, POST to /run, receive JSON response.
+
+**Acceptance Scenarios**:
+
+1. **Given** an HTTP handler configured, **When** POST /run with messages, **Then** receive JSON RunResult
+2. **Given** streaming endpoint, **When** POST /stream, **Then** receive SSE events
+
+---
+
+### Edge Cases
+
+- What happens when provider API is rate limited? → Return wrapped error with retry info
+- How does system handle MaxSteps exceeded? → Return result with FinishReason="max_steps"
+- What happens when tool schema validation fails? → Return validation error before execution
+- How does system handle context cancellation mid-tool-execution? → Tools receive context, must respect cancellation
+
+---
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: System MUST support multiple LLM providers via a common Provider interface
+- **FR-002**: System MUST implement streaming and non-streaming completion modes
+- **FR-003**: System MUST support tool registration and automatic tool calling in agent loop
+- **FR-004**: System MUST enforce MaxSteps limit to prevent infinite loops
+- **FR-005**: System MUST persist conversation history via pluggable Memory backends
+- **FR-006**: System MUST expose HTTP endpoints for run, stream, tools, and health
+- **FR-007**: System MUST support skill bundling (tools + instructions)
+- **FR-008**: System MUST be thread-safe for concurrent agent runs
+- **FR-009**: System MUST validate tool parameters against JSON schema
+- **FR-010**: System MUST support context cancellation at all levels
+- **FR-011**: System MUST NOT log API keys or sensitive credentials
+- **FR-012**: System MUST use TLS for all provider HTTP requests
+
+### Key Entities
+
+- **Provider**: Abstraction for LLM API clients (OpenAI, Anthropic, etc.)
+- **Agent**: Orchestrates provider, tools, memory for agent loop execution
+- **Tool**: Executable function with JSON schema parameters
+- **Skill**: Bundle of tools + instructions for specific capabilities
+- **Memory**: Conversation history persistence backend
+- **Message**: Single conversation entry (role, content, tool calls/results)
+
+---
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: Basic agent completion works with < 5s latency for typical requests
+- **SC-002**: Tool calling loop completes within MaxSteps with correct tool execution
+- **SC-003**: Memory.Get returns 100 entries in < 10ms
+- **SC-004**: Zero external dependencies in core module (stdlib only)
+- **SC-005**: All interfaces have mock implementations for testing
+- **SC-006**: HTTP handler passes standard compliance tests
+- **SC-007**: Provider tests use recorded fixtures (no live API calls in CI)
+
+### Previous work
+
+None - this is the initial v2 framework specification.
 
 ---
 

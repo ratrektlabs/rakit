@@ -537,6 +537,15 @@
 - **Acceptance**: Provider implements interface, no API keys logged, TLS enforced
 - **Test**: `provider/zai/zai_test.go` - `TestSC007_RecordedFixtures`
 
+### P8.4 - Provider Tests `[SC-007]`
+- [ ] Create provider-specific test files for all providers
+- [ ] Record HTTP fixtures for Anthropic, Gemini, Zai
+- [ ] Test Complete() with various responses for each provider
+- [ ] Test Stream() event handling for each provider
+- [ ] Test error cases (rate limit, timeout, invalid response)
+- **Acceptance**: All providers tested with recorded fixtures
+- **Test**: `provider/*_test.go` - `TestSC007_RecordedFixtures`
+
 **Phase 8 Acceptance**:
 - [ ] All providers implement Provider interface (FR-001)
 - [ ] Streaming works for all providers
@@ -629,9 +638,9 @@
 | 5. Memory | 6 | 2 | P2 | FR-005, FR-010 | [ ] |
 | 6. HTTP | 7 | 2 | P3 | FR-006 | [ ] |
 | 7. Compaction | 3 | 1 | - | - | [ ] |
-| 8. Providers | 3 | 1 | P1 | FR-001, FR-011, FR-012 | [ ] |
+| 8. Providers | 4 | 1 | P1 | FR-001, FR-011, FR-012 | [ ] |
 | 9. Examples | 5 | 1 | - | SC-004 | [ ] |
-| **Total** | **54** | **10** | | | |
+| **Total** | **55** | **10** | | | |
 
 ---
 

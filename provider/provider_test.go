@@ -264,10 +264,13 @@ func TestWrapError_AlreadyProviderError(t *testing.T) {
 func TestStreamBuilder(t *testing.T) {
 	ctx := context.Background()
 	builder := NewStreamBuilder(ctx, 10)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		builder.EmitDelta("Hello")
 		builder.EmitDelta(" world")
 		builder.EmitDone("stop")
+		builder.Close()
 	}()
 	var deltas []string
 	var finishReason string
@@ -279,6 +282,7 @@ func TestStreamBuilder(t *testing.T) {
 			finishReason = event.FinishReason
 		}
 	}
+	<-done
 	if len(deltas) != 2 {
 		t.Errorf("expected 2 deltas, got %d", len(deltas))
 	}

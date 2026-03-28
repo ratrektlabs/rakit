@@ -127,11 +127,15 @@ func main() {
 	// Admin API
 	registerAdminHandlers(mux, a)
 
+	// Frontend static files
+	mux.Handle("/", http.FileServer(http.Dir("../frontend")))
+
 	addr := ":8080"
 	fmt.Printf("Agent server listening on %s\n", addr)
 	fmt.Println("Data stored in ./data/")
 	fmt.Println("Admin API at /api/v1/")
-	log.Fatal(http.ListenAndServe(addr, requestLogger(mux)))
+	fmt.Println("Dashboard at http://localhost" + addr)
+	log.Fatal(http.ListenAndServe(addr, corsMiddleware(requestLogger(mux))))
 }
 
 func requestLogger(next http.Handler) http.Handler {
@@ -151,4 +155,17 @@ type loggingWriter struct {
 func (lw *loggingWriter) WriteHeader(code int) {
 	lw.status = code
 	lw.ResponseWriter.WriteHeader(code)
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

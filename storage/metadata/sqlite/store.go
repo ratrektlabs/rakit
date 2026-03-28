@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -22,7 +23,9 @@ type Store struct {
 
 // NewStore opens (or creates) a SQLite database at dbPath and runs migrations.
 func NewStore(ctx context.Context, dbPath string) (*Store, error) {
-	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("sqlite: create directory: %w", err)
+	}
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -38,7 +41,6 @@ func NewStore(ctx context.Context, dbPath string) (*Store, error) {
 	s := &Store{db: db}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
-		_ = dir // dir created by sql.Open if needed
 		return nil, fmt.Errorf("sqlite: migrate: %w", err)
 	}
 

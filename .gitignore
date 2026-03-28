@@ -49,6 +49,9 @@ secrets.*
 *.sqlite
 *.sqlite3
 
+# Local data directory
+data/
+
 # Logs
 *.log
 logs/

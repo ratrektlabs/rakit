@@ -28,8 +28,9 @@ func New(model, apiKey string) (*Provider, error) {
 	return &Provider{client: client, model: model}, nil
 }
 
-func (p *Provider) Name() string  { return "gemini" }
-func (p *Provider) Model() string { return p.model }
+func (p *Provider) Name() string        { return "gemini" }
+func (p *Provider) Model() string       { return p.model }
+func (p *Provider) SetModel(m string)    { p.model = m }
 
 func (p *Provider) Models() []string {
 	return []string{"gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview"}

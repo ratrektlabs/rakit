@@ -80,7 +80,9 @@ func main() {
 	reg.SetDefault(aisdk.New())
 
 	// HTTP handler
-	http.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		p := reg.Negotiate(r.Header.Get("Accept"))
 		if p == nil {
 			p = reg.Default()
@@ -114,12 +116,19 @@ func main() {
 		}
 
 		if err := p.EncodeStream(r.Context(), w, events); err != nil {
-			log.Printf("Stream error: %v", err)
+			// Client disconnect is normal, don't log it
+			if r.Context().Err() == nil {
+				log.Printf("Stream error: %v", err)
+			}
 		}
 	})
+
+	// Admin API
+	agent.RegisterHandlers(mux, a)
 
 	addr := ":8080"
 	fmt.Printf("Agent server listening on %s\n", addr)
 	fmt.Println("Data stored in ./data/")
-	log.Fatal(http.ListenAndServe(addr, nil))
+	fmt.Println("Admin API at /api/v1/")
+	log.Fatal(http.ListenAndServe(addr, mux))
 }

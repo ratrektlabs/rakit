@@ -118,6 +118,28 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
+	cursor, err := s.sessions.Find(ctx, bson.D{{Key: "agentid", Value: agentID}})
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var sessions []*metadata.Session
+	for cursor.Next(ctx) {
+		var sess metadata.Session
+		if err := cursor.Decode(&sess); err != nil {
+			return nil, fmt.Errorf("decode session: %w", err)
+		}
+		sess.Messages = []metadata.Message{}
+		sessions = append(sessions, &sess)
+	}
+	if sessions == nil {
+		sessions = []*metadata.Session{}
+	}
+	return sessions, nil
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------

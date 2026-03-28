@@ -21,8 +21,9 @@ func New(model, apiKey string) *Provider {
 	return &Provider{client: client, model: model}
 }
 
-func (p *Provider) Name() string  { return "openai" }
-func (p *Provider) Model() string { return p.model }
+func (p *Provider) Name() string        { return "openai" }
+func (p *Provider) Model() string       { return p.model }
+func (p *Provider) SetModel(m string)    { p.model = m }
 
 func (p *Provider) Models() []string {
 	return []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}

@@ -70,12 +70,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS tools (
-			id          TEXT PRIMARY KEY,
-			agent_id    TEXT NOT NULL,
-			name        TEXT NOT NULL UNIQUE,
-			description TEXT DEFAULT '',
-			parameters  TEXT DEFAULT 'null',
-			created_at  INTEGER NOT NULL
+			id            TEXT PRIMARY KEY,
+			agent_id      TEXT NOT NULL,
+			name          TEXT NOT NULL UNIQUE,
+			description   TEXT DEFAULT '',
+			parameters    TEXT DEFAULT 'null',
+			handler       TEXT DEFAULT 'http',
+			endpoint      TEXT DEFAULT '',
+			headers       TEXT DEFAULT '{}',
+			input_mapping TEXT DEFAULT '{}',
+			script_path   TEXT DEFAULT '',
+			created_at    INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS skills (
 			name         TEXT PRIMARY KEY,
@@ -97,6 +102,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+
+	// Alter existing tables to add new columns (no-op if column already exists).
+	alters := []string{
+		`ALTER TABLE tools ADD COLUMN handler TEXT DEFAULT 'http'`,
+		`ALTER TABLE tools ADD COLUMN endpoint TEXT DEFAULT ''`,
+		`ALTER TABLE tools ADD COLUMN headers TEXT DEFAULT '{}'`,
+		`ALTER TABLE tools ADD COLUMN input_mapping TEXT DEFAULT '{}'`,
+		`ALTER TABLE tools ADD COLUMN script_path TEXT DEFAULT ''`,
+	}
+	for _, a := range alters {
+		// SQLite ALTER TABLE ADD COLUMN fails if the column already exists.
+		// Ignore the error since we only want to add missing columns.
+		s.db.ExecContext(ctx, a)
+	}
+
 	return nil
 }
 
@@ -204,6 +224,31 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, agent_id, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC",
+		agentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []*metadata.Session
+	for rows.Next() {
+		var sess metadata.Session
+		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("sqlite: scan session: %w", err)
+		}
+		sess.Messages = []metadata.Message{}
+		sessions = append(sessions, &sess)
+	}
+	if sessions == nil {
+		sessions = []*metadata.Session{}
+	}
+	return sessions, nil
+}
+
 func (s *Store) loadMessages(ctx context.Context, sessionID string) ([]metadata.Message, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, role, content, tool_calls, created_at FROM session_messages WHERE session_id = ? ORDER BY created_at ASC",
@@ -234,42 +279,56 @@ func (s *Store) loadMessages(ctx context.Context, sessionID string) ([]metadata.
 
 // --- Tools ---
 
-func (s *Store) SaveTool(ctx context.Context, tool *metadata.ToolDef) error {
-	if tool.ID == "" {
-		tool.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
+func (s *Store) SaveTool(ctx context.Context, td *metadata.ToolDef) error {
+	if td.ID == "" {
+		td.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
 	}
-	if tool.CreatedAt == 0 {
-		tool.CreatedAt = time.Now().UnixMilli()
+	if td.CreatedAt == 0 {
+		td.CreatedAt = time.Now().UnixMilli()
 	}
 
-	paramsJSON, err := json.Marshal(tool.Parameters)
+	paramsJSON, err := json.Marshal(td.Parameters)
 	if err != nil {
 		return fmt.Errorf("sqlite: marshal params: %w", err)
 	}
+	headersJSON, err := json.Marshal(td.Headers)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal headers: %w", err)
+	}
+	mappingJSON, err := json.Marshal(td.InputMapping)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal input_mapping: %w", err)
+	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO tools (id, agent_id, name, description, parameters, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO tools (id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, script_path, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
-		   agent_id    = excluded.agent_id,
-		   description = excluded.description,
-		   parameters  = excluded.parameters`,
-		tool.ID, tool.AgentID, tool.Name, tool.Description, string(paramsJSON), tool.CreatedAt,
+		   agent_id      = excluded.agent_id,
+		   description   = excluded.description,
+		   parameters    = excluded.parameters,
+		   handler       = excluded.handler,
+		   endpoint      = excluded.endpoint,
+		   headers       = excluded.headers,
+		   input_mapping = excluded.input_mapping,
+		   script_path   = excluded.script_path`,
+		td.ID, td.AgentID, td.Name, td.Description, string(paramsJSON),
+		td.Handler, td.Endpoint, string(headersJSON), string(mappingJSON), td.ScriptPath, td.CreatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("sqlite: save tool %q: %w", tool.Name, err)
+		return fmt.Errorf("sqlite: save tool %q: %w", td.Name, err)
 	}
 	return nil
 }
 
 func (s *Store) GetTool(ctx context.Context, name string) (*metadata.ToolDef, error) {
-	var tool metadata.ToolDef
-	var paramsJSON string
+	var td metadata.ToolDef
+	var paramsJSON, headersJSON, mappingJSON string
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, name, description, parameters, created_at FROM tools WHERE name = ?",
+		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, script_path, created_at FROM tools WHERE name = ?",
 		name,
-	).Scan(&tool.ID, &tool.AgentID, &tool.Name, &tool.Description, &paramsJSON, &tool.CreatedAt)
+	).Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ScriptPath, &td.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -277,15 +336,21 @@ func (s *Store) GetTool(ctx context.Context, name string) (*metadata.ToolDef, er
 		return nil, fmt.Errorf("sqlite: get tool %q: %w", name, err)
 	}
 
-	if err := json.Unmarshal([]byte(paramsJSON), &tool.Parameters); err != nil {
-		tool.Parameters = nil
+	_ = json.Unmarshal([]byte(paramsJSON), &td.Parameters)
+	_ = json.Unmarshal([]byte(headersJSON), &td.Headers)
+	_ = json.Unmarshal([]byte(mappingJSON), &td.InputMapping)
+	if td.Headers == nil {
+		td.Headers = map[string]string{}
 	}
-	return &tool, nil
+	if td.InputMapping == nil {
+		td.InputMapping = map[string]string{}
+	}
+	return &td, nil
 }
 
 func (s *Store) ListTools(ctx context.Context, agentID string) ([]*metadata.ToolDef, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, name, description, parameters, created_at FROM tools WHERE agent_id = ?",
+		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, script_path, created_at FROM tools WHERE agent_id = ?",
 		agentID,
 	)
 	if err != nil {
@@ -295,15 +360,21 @@ func (s *Store) ListTools(ctx context.Context, agentID string) ([]*metadata.Tool
 
 	var tools []*metadata.ToolDef
 	for rows.Next() {
-		var tool metadata.ToolDef
-		var paramsJSON string
-		if err := rows.Scan(&tool.ID, &tool.AgentID, &tool.Name, &tool.Description, &paramsJSON, &tool.CreatedAt); err != nil {
+		var td metadata.ToolDef
+		var paramsJSON, headersJSON, mappingJSON string
+		if err := rows.Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ScriptPath, &td.CreatedAt); err != nil {
 			return nil, fmt.Errorf("sqlite: scan tool: %w", err)
 		}
-		if err := json.Unmarshal([]byte(paramsJSON), &tool.Parameters); err != nil {
-			tool.Parameters = nil
+		_ = json.Unmarshal([]byte(paramsJSON), &td.Parameters)
+		_ = json.Unmarshal([]byte(headersJSON), &td.Headers)
+		_ = json.Unmarshal([]byte(mappingJSON), &td.InputMapping)
+		if td.Headers == nil {
+			td.Headers = map[string]string{}
 		}
-		tools = append(tools, &tool)
+		if td.InputMapping == nil {
+			td.InputMapping = map[string]string{}
+		}
+		tools = append(tools, &td)
 	}
 	return tools, nil
 }

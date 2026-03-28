@@ -21,6 +21,7 @@ type Provider interface {
 	Name() string
 	Model() string
 	Models() []string
+	SetModel(model string)
 	Stream(ctx context.Context, req *Request) (<-chan Event, error)
 	Generate(ctx context.Context, req *Request) (*Response, error)
 }

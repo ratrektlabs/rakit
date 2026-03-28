@@ -145,6 +145,35 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
+	iter := s.client.Collection(sessionsCol).Where("agentID", "==", agentID).Documents(ctx)
+	defer iter.Stop()
+
+	var sessions []*metadata.Session
+	for {
+		doc, err := iter.Next()
+		if err != nil {
+			break
+		}
+		data := doc.Data()
+		agentID, _ := data["agentID"].(string)
+		createdAt, _ := data["createdAt"].(int64)
+		updatedAt, _ := data["updatedAt"].(int64)
+		sess := &metadata.Session{
+			ID:        doc.Ref.ID,
+			AgentID:   agentID,
+			CreatedAt: createdAt,
+			UpdatedAt: updatedAt,
+			Messages:  []metadata.Message{},
+		}
+		sessions = append(sessions, sess)
+	}
+	if sessions == nil {
+		sessions = []*metadata.Session{}
+	}
+	return sessions, nil
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------

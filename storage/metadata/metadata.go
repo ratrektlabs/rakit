@@ -70,6 +70,7 @@ type Store interface {
 	// Sessions
 	CreateSession(ctx context.Context, agentID string) (*Session, error)
 	GetSession(ctx context.Context, id string) (*Session, error)
+	ListSessions(ctx context.Context, agentID string) ([]*Session, error)
 	UpdateSession(ctx context.Context, s *Session) error
 	DeleteSession(ctx context.Context, id string) error
 

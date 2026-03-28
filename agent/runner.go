@@ -275,8 +275,8 @@ func (a *Agent) RunWithSession(
 			}
 		}
 
-		// Save session
-		if err := a.Store.UpdateSession(ctx, sess); err != nil {
+		// Save session (use Background context to survive request cancellation)
+		if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
 			log.Printf("session save failed: %v", err)
 		}
 	}()

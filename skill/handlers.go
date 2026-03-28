@@ -129,3 +129,44 @@ func (t *ScriptTool) Execute(ctx context.Context, input map[string]any) (*tool.R
 		return tool.Ok(string(data)), nil
 	})
 }
+
+// NewHTTPTool creates an HTTPTool from its constituent parts.
+func NewHTTPTool(name, description string, parameters any, endpoint string, headers map[string]string, inputMap map[string]string) *HTTPTool {
+	return &HTTPTool{
+		name:        name,
+		description: description,
+		parameters:  parameters,
+		endpoint:    endpoint,
+		headers:     headers,
+		inputMap:    inputMap,
+	}
+}
+
+// NewScriptTool creates a ScriptTool from its constituent parts.
+func NewScriptTool(name, description string, parameters any, scriptPath string, rm *ResourceManager) *ScriptTool {
+	return &ScriptTool{
+		name:        name,
+		description: description,
+		parameters:  parameters,
+		scriptPath:  scriptPath,
+		resources:   rm,
+	}
+}
+
+// ToolFromDef builds a tool.Tool from a skill ToolDef.
+func ToolFromDef(def ToolDef, rm *ResourceManager) (tool.Tool, error) {
+	switch def.Handler {
+	case "http", "":
+		if def.Endpoint == "" {
+			return nil, fmt.Errorf("tool %q: http handler requires an endpoint", def.Name)
+		}
+		return NewHTTPTool(def.Name, def.Description, def.Parameters, def.Endpoint, def.Headers, def.InputMapping), nil
+	case "script":
+		if def.ScriptPath == "" {
+			return nil, fmt.Errorf("tool %q: script handler requires a script_path", def.Name)
+		}
+		return NewScriptTool(def.Name, def.Description, def.Parameters, def.ScriptPath, rm), nil
+	default:
+		return nil, fmt.Errorf("tool %q: unknown handler %q", def.Name, def.Handler)
+	}
+}

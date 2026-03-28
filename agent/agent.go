@@ -15,15 +15,16 @@ import (
 
 // Agent is the core runtime that orchestrates providers, protocols, and tools.
 type Agent struct {
-	ID         string
-	Provider   provider.Provider
-	Protocol   protocol.Protocol
-	Tools      *tool.Registry
-	Skills     *skill.Registry
-	Store      metadata.Store
-	FS         blob.BlobStore
-	hooks      []Hook
-	compaction CompactionConfig
+	ID            string
+	Provider      provider.Provider
+	Protocol      protocol.Protocol
+	Tools         *tool.Registry
+	Skills        *skill.Registry
+	Store         metadata.Store
+	FS            blob.BlobStore
+	hooks         []Hook
+	compaction    CompactionConfig
+	maxIterations int
 }
 
 // Option configures an Agent.
@@ -65,13 +66,20 @@ func WithCompaction(cfg CompactionConfig) Option {
 	return func(a *Agent) { a.compaction = cfg }
 }
 
+// WithMaxIterations sets the maximum number of agentic loop iterations.
+// Default is 10. Set to 1 for single-turn behavior.
+func WithMaxIterations(n int) Option {
+	return func(a *Agent) { a.maxIterations = n }
+}
+
 // New creates a new Agent with the given options.
 func New(opts ...Option) *Agent {
 	a := &Agent{
-		ID:         generateID(),
-		Tools:      tool.NewRegistry(),
-		hooks:      make([]Hook, 0),
-		compaction: DefaultCompactionConfig(),
+		ID:            generateID(),
+		Tools:         tool.NewRegistry(),
+		hooks:         make([]Hook, 0),
+		compaction:    DefaultCompactionConfig(),
+		maxIterations: 10,
 	}
 	for _, opt := range opts {
 		opt(a)

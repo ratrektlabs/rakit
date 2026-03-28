@@ -32,12 +32,17 @@ type ToolCallRecord struct {
 
 // ToolDef is a persisted tool definition.
 type ToolDef struct {
-	ID          string
-	AgentID     string
-	Name        string
-	Description string
+	ID           string
+	AgentID      string
+	Name         string
+	Description  string
 	Parameters  any
-	CreatedAt   int64
+	Handler      string            // "http", "script"
+	Endpoint     string            // for http handler
+	Headers      map[string]string
+	InputMapping map[string]string
+	ScriptPath   string            // for script handler
+	CreatedAt    int64
 }
 
 // SkillEntry is the lightweight L1 record (name + description).

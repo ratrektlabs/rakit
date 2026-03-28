@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/ratrektlabs/rakit/storage/metadata"
 )
@@ -69,6 +70,9 @@ func (r *Registry) Enable(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if def == nil {
+		return fmt.Errorf("skill: %q not found", name)
+	}
 	def.Enabled = true
 	return r.store.SaveSkill(ctx, def)
 }
@@ -78,6 +82,9 @@ func (r *Registry) Disable(ctx context.Context, name string) error {
 	def, err := r.store.GetSkill(ctx, name)
 	if err != nil {
 		return err
+	}
+	if def == nil {
+		return fmt.Errorf("skill: %q not found", name)
 	}
 	def.Enabled = false
 	return r.store.SaveSkill(ctx, def)

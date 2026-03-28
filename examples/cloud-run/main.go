@@ -30,7 +30,7 @@ func main() {
 	}
 
 	// Storage
-	store, err := metaMongo.NewStore(ctx, mongoURI, "rl_agent")
+	store, err := metaMongo.NewStore(ctx, mongoURI, "rakit")
 	if err != nil {
 		log.Fatalf("Failed to create MongoDB store: %v", err)
 	}

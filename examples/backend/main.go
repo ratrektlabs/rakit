@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/ratrektlabs/rakit/agent"
 	"github.com/ratrektlabs/rakit/protocol"
@@ -130,5 +131,24 @@ func main() {
 	fmt.Printf("Agent server listening on %s\n", addr)
 	fmt.Println("Data stored in ./data/")
 	fmt.Println("Admin API at /api/v1/")
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Fatal(http.ListenAndServe(addr, requestLogger(mux)))
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lw := &loggingWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(lw, r)
+		log.Printf("%s %s %d %s", r.Method, r.URL.Path, lw.status, time.Since(start))
+	})
+}
+
+type loggingWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (lw *loggingWriter) WriteHeader(code int) {
+	lw.status = code
+	lw.ResponseWriter.WriteHeader(code)
 }

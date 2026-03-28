@@ -1,6 +1,8 @@
 package tool
 
-import "github.com/ratrektlabs/rakit/provider"
+import (
+	"github.com/ratrektlabs/rakit/provider"
+)
 
 // Registry manages available tools.
 type Registry struct {

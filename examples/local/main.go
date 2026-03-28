@@ -124,7 +124,7 @@ func main() {
 	})
 
 	// Admin API
-	agent.RegisterHandlers(mux, a)
+	registerAdminHandlers(mux, a)
 
 	addr := ":8080"
 	fmt.Printf("Agent server listening on %s\n", addr)

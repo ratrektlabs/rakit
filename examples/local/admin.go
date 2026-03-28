@@ -1,19 +1,19 @@
-package agent
+package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
+	"github.com/ratrektlabs/rakit/agent"
 	"github.com/ratrektlabs/rakit/storage/metadata"
 )
 
-// RegisterHandlers registers admin API routes on the given mux.
+// registerAdminHandlers registers admin API routes on the given mux.
 // All routes are prefixed with /api/v1/.
-func RegisterHandlers(mux *http.ServeMux, a *Agent) {
-	h := &handler{agent: a}
+func registerAdminHandlers(mux *http.ServeMux, a *agent.Agent) {
+	h := &adminHandler{agent: a}
 
 	// Sessions
 	mux.HandleFunc("GET /api/v1/sessions", h.listSessions)
@@ -46,8 +46,8 @@ func RegisterHandlers(mux *http.ServeMux, a *Agent) {
 	mux.HandleFunc("PUT /api/v1/provider/model", h.setModel)
 }
 
-type handler struct {
-	agent *Agent
+type adminHandler struct {
+	agent *agent.Agent
 }
 
 // --- Helpers ---
@@ -62,22 +62,22 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func (h *handler) requireStore(w http.ResponseWriter) *metadata.Store {
+func (h *adminHandler) requireStore(w http.ResponseWriter) metadata.Store {
 	if h.agent.Store == nil {
 		writeError(w, http.StatusBadRequest, "no store configured")
 		return nil
 	}
-	return &h.agent.Store
+	return h.agent.Store
 }
 
 // --- Sessions ---
 
-func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) listSessions(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
-	sessions, err := (*store).ListSessions(r.Context(), h.agent.ID)
+	sessions, err := store.ListSessions(r.Context(), h.agent.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -104,12 +104,12 @@ func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
 }
 
-func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) createSession(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
-	sess, err := (*store).CreateSession(r.Context(), h.agent.ID)
+	sess, err := store.CreateSession(r.Context(), h.agent.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -117,13 +117,13 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"session": sess})
 }
 
-func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) getSession(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	id := r.PathValue("id")
-	sess, err := (*store).GetSession(r.Context(), id)
+	sess, err := store.GetSession(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -135,13 +135,13 @@ func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"session": sess})
 }
 
-func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) deleteSession(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	id := r.PathValue("id")
-	if err := (*store).DeleteSession(r.Context(), id); err != nil {
+	if err := store.DeleteSession(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -150,7 +150,7 @@ func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
 
 // --- Skills ---
 
-func (h *handler) listSkills(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) listSkills(w http.ResponseWriter, r *http.Request) {
 	if h.agent.Skills == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"skills": []any{}})
 		return
@@ -163,7 +163,7 @@ func (h *handler) listSkills(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"skills": entries})
 }
 
-func (h *handler) registerSkill(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) registerSkill(w http.ResponseWriter, r *http.Request) {
 	if h.agent.Skills == nil {
 		writeError(w, http.StatusBadRequest, "no skill registry configured")
 		return
@@ -200,13 +200,13 @@ func (h *handler) registerSkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
 }
 
-func (h *handler) getSkill(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) getSkill(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	name := r.PathValue("name")
-	def, err := (*store).GetSkill(r.Context(), name)
+	def, err := store.GetSkill(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -218,20 +218,20 @@ func (h *handler) getSkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"skill": def})
 }
 
-func (h *handler) deleteSkill(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) deleteSkill(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	name := r.PathValue("name")
-	if err := (*store).DeleteSkill(r.Context(), name); err != nil {
+	if err := store.DeleteSkill(r.Context(), name); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (h *handler) enableSkill(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) enableSkill(w http.ResponseWriter, r *http.Request) {
 	if h.agent.Skills == nil {
 		writeError(w, http.StatusBadRequest, "no skill registry configured")
 		return
@@ -244,7 +244,7 @@ func (h *handler) enableSkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (h *handler) disableSkill(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) disableSkill(w http.ResponseWriter, r *http.Request) {
 	if h.agent.Skills == nil {
 		writeError(w, http.StatusBadRequest, "no skill registry configured")
 		return
@@ -259,12 +259,12 @@ func (h *handler) disableSkill(w http.ResponseWriter, r *http.Request) {
 
 // --- Tools ---
 
-func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) listTools(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
-	tools, err := (*store).ListTools(r.Context(), h.agent.ID)
+	tools, err := store.ListTools(r.Context(), h.agent.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -272,7 +272,7 @@ func (h *handler) listTools(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tools": tools})
 }
 
-func (h *handler) saveTool(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) saveTool(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
@@ -292,20 +292,20 @@ func (h *handler) saveTool(w http.ResponseWriter, r *http.Request) {
 		td.CreatedAt = time.Now().UnixMilli()
 	}
 
-	if err := (*store).SaveTool(r.Context(), &td); err != nil {
+	if err := store.SaveTool(r.Context(), &td); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
 }
 
-func (h *handler) getTool(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) getTool(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	name := r.PathValue("name")
-	td, err := (*store).GetTool(r.Context(), name)
+	td, err := store.GetTool(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -317,13 +317,13 @@ func (h *handler) getTool(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tool": td})
 }
 
-func (h *handler) deleteTool(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) deleteTool(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	name := r.PathValue("name")
-	if err := (*store).DeleteTool(r.Context(), name); err != nil {
+	if err := store.DeleteTool(r.Context(), name); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -332,7 +332,7 @@ func (h *handler) deleteTool(w http.ResponseWriter, r *http.Request) {
 
 // --- Memory ---
 
-func (h *handler) getMemory(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) getMemory(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
@@ -342,7 +342,7 @@ func (h *handler) getMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing key parameter")
 		return
 	}
-	value, err := (*store).Get(r.Context(), key)
+	value, err := store.Get(r.Context(), key)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -354,7 +354,7 @@ func (h *handler) getMemory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": string(value)})
 }
 
-func (h *handler) setMemory(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) setMemory(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
@@ -371,36 +371,33 @@ func (h *handler) setMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing key")
 		return
 	}
-	if err := (*store).Set(r.Context(), body.Key, []byte(body.Value)); err != nil {
+	if err := store.Set(r.Context(), body.Key, []byte(body.Value)); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (h *handler) deleteMemory(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) deleteMemory(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	key := r.PathValue("key")
-	if err := (*store).Delete(r.Context(), key); err != nil {
+	if err := store.Delete(r.Context(), key); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (h *handler) listMemory(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) listMemory(w http.ResponseWriter, r *http.Request) {
 	store := h.requireStore(w)
 	if store == nil {
 		return
 	}
 	prefix := r.URL.Query().Get("prefix")
-	if prefix == "" {
-		prefix = ""
-	}
-	keys, err := (*store).List(r.Context(), prefix)
+	keys, err := store.List(r.Context(), prefix)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -413,7 +410,7 @@ func (h *handler) listMemory(w http.ResponseWriter, r *http.Request) {
 
 // --- Provider ---
 
-func (h *handler) getProvider(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) getProvider(w http.ResponseWriter, r *http.Request) {
 	if h.agent.Provider == nil {
 		writeError(w, http.StatusBadRequest, "no provider configured")
 		return
@@ -425,7 +422,7 @@ func (h *handler) getProvider(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *handler) setModel(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) setModel(w http.ResponseWriter, r *http.Request) {
 	if h.agent.Provider == nil {
 		writeError(w, http.StatusBadRequest, "no provider configured")
 		return
@@ -444,6 +441,3 @@ func (h *handler) setModel(w http.ResponseWriter, r *http.Request) {
 	h.agent.Provider.SetModel(body.Model)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": body.Model})
 }
-
-// strconv helper (unused but kept for future use).
-var _ = strconv.Atoi

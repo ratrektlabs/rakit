@@ -30,7 +30,6 @@ package main
 import (
     "context"
     "fmt"
-    "net/http"
     "github.com/ratrektlabs/rakit/agent"
     "github.com/ratrektlabs/rakit/protocol/aisdk"
     "github.com/ratrektlabs/rakit/provider/openai"
@@ -59,12 +58,6 @@ func main() {
     for e := range events {
         fmt.Println(e)
     }
-
-    // Or expose as HTTP server with admin API
-    mux := http.NewServeMux()
-    mux.HandleFunc("/chat", myChatHandler)
-    agent.RegisterHandlers(mux, a)  // /api/v1/* admin endpoints
-    http.ListenAndServe(":8080", mux)
 }
 ```
 

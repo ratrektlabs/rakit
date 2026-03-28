@@ -13,8 +13,8 @@ import (
 	"github.com/ratrektlabs/rl-agent/protocol/aisdk"
 	"github.com/ratrektlabs/rl-agent/provider/gemini"
 	"github.com/ratrektlabs/rl-agent/skill"
-	blobS3 "github.com/ratrektlabs/rl-agent/storage/blob/s3"
-	metaFirestore "github.com/ratrektlabs/rl-agent/storage/metadata/firestore"
+	blobLocal "github.com/ratrektlabs/rl-agent/storage/blob/local"
+	metaSQLite "github.com/ratrektlabs/rl-agent/storage/metadata/sqlite"
 )
 
 func main() {
@@ -22,23 +22,22 @@ func main() {
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
-		log.Fatal("GEMINI_API_KEY is required")
+		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
-	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	if projectID == "" {
-		log.Fatal("GOOGLE_CLOUD_PROJECT is required")
+	if apiKey == "" {
+		log.Fatal("GEMINI_API_KEY or OPENAI_API_KEY is required")
 	}
 
-	// Storage
-	store, err := metaFirestore.NewStore(ctx, projectID)
+	// Storage (local — no external services required)
+	store, err := metaSQLite.NewStore(ctx, "./data/agent.db")
 	if err != nil {
-		log.Fatalf("Failed to create Firestore store: %v", err)
+		log.Fatalf("Failed to create SQLite store: %v", err)
 	}
 	defer store.Close()
 
-	fs, err := blobS3.New(ctx, "my-agent-workspace", blobS3.WithPrefix("agents"))
+	fs, err := blobLocal.New("./data/workspace")
 	if err != nil {
-		log.Fatalf("Failed to create S3 store: %v", err)
+		log.Fatalf("Failed to create local blob store: %v", err)
 	}
 
 	// Provider
@@ -90,14 +89,25 @@ func main() {
 		w.Header().Set("Content-Type", p.ContentType())
 
 		var req struct {
-			Message string `json:"message"`
+			Message   string `json:"message"`
+			SessionID string `json:"sessionId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 
-		events, err := a.RunWithProtocol(r.Context(), req.Message, p)
+		// Create session if not provided
+		if req.SessionID == "" {
+			sess, err := a.CreateSession(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			req.SessionID = sess.ID
+		}
+
+		events, err := a.RunWithSession(r.Context(), req.SessionID, req.Message, p)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -110,5 +120,6 @@ func main() {
 
 	addr := ":8080"
 	fmt.Printf("Agent server listening on %s\n", addr)
+	fmt.Println("Data stored in ./data/")
 	log.Fatal(http.ListenAndServe(addr, nil))
 }

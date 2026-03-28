@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 
@@ -14,14 +15,15 @@ import (
 
 // Agent is the core runtime that orchestrates providers, protocols, and tools.
 type Agent struct {
-	ID       string
-	Provider provider.Provider
-	Protocol protocol.Protocol
-	Tools    *tool.Registry
-	Skills   *skill.Registry
-	Store    metadata.Store
-	FS       blob.BlobStore
-	hooks    []Hook
+	ID         string
+	Provider   provider.Provider
+	Protocol   protocol.Protocol
+	Tools      *tool.Registry
+	Skills     *skill.Registry
+	Store      metadata.Store
+	FS         blob.BlobStore
+	hooks      []Hook
+	compaction CompactionConfig
 }
 
 // Option configures an Agent.
@@ -58,12 +60,18 @@ func WithHooks(hooks ...Hook) Option {
 	return func(a *Agent) { a.hooks = append(a.hooks, hooks...) }
 }
 
+// WithCompaction sets the compaction configuration.
+func WithCompaction(cfg CompactionConfig) Option {
+	return func(a *Agent) { a.compaction = cfg }
+}
+
 // New creates a new Agent with the given options.
 func New(opts ...Option) *Agent {
 	a := &Agent{
-		ID:    generateID(),
-		Tools: tool.NewRegistry(),
-		hooks: make([]Hook, 0),
+		ID:         generateID(),
+		Tools:      tool.NewRegistry(),
+		hooks:      make([]Hook, 0),
+		compaction: DefaultCompactionConfig(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -75,4 +83,12 @@ func generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)
+}
+
+// CreateSession creates a new session for this agent.
+func (a *Agent) CreateSession(ctx context.Context) (*metadata.Session, error) {
+	if a.Store == nil {
+		return nil, fmt.Errorf("agent: no store configured")
+	}
+	return a.Store.CreateSession(ctx, a.ID)
 }

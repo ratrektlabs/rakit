@@ -22,75 +22,97 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 	switch e := event.(type) {
 	case *protocol.RunStartedEvent:
 		return writeSSE(w, map[string]any{
-			"type":     "RunStarted",
+			"type":     "RUN_STARTED",
 			"threadId": e.ThreadID,
 			"runId":    e.RunID,
 		})
 	case *protocol.TextStartEvent:
 		return writeSSE(w, map[string]any{
-			"type":      "TextMessageStart",
+			"type":      "TEXT_MESSAGE_START",
 			"messageId": e.MessageID,
 			"role":      "assistant",
 		})
 	case *protocol.TextDeltaEvent:
 		return writeSSE(w, map[string]any{
-			"type":      "TextMessageContent",
+			"type":      "TEXT_MESSAGE_CONTENT",
 			"messageId": e.MessageID,
 			"delta":     e.Delta,
 		})
 	case *protocol.TextEndEvent:
 		return writeSSE(w, map[string]any{
-			"type":      "TextMessageEnd",
+			"type":      "TEXT_MESSAGE_END",
 			"messageId": e.MessageID,
 		})
 	case *protocol.ToolCallStartEvent:
 		return writeSSE(w, map[string]any{
-			"type":         "ToolCallStart",
+			"type":         "TOOL_CALL_START",
 			"toolCallId":   e.ToolCallID,
 			"toolCallName": e.ToolCallName,
 		})
 	case *protocol.ToolCallArgsEvent:
 		return writeSSE(w, map[string]any{
-			"type":       "ToolCallArgs",
+			"type":       "TOOL_CALL_ARGS",
 			"toolCallId": e.ToolCallID,
 			"delta":      e.Delta,
 		})
 	case *protocol.ToolCallEndEvent:
 		return writeSSE(w, map[string]any{
-			"type":       "ToolCallEnd",
+			"type":       "TOOL_CALL_END",
 			"toolCallId": e.ToolCallID,
 		})
 	case *protocol.ToolResultEvent:
 		return writeSSE(w, map[string]any{
-			"type":       "ToolCallResult",
+			"type":       "TOOL_CALL_RESULT",
 			"toolCallId": e.ToolCallID,
 			"content":    e.Result,
 			"role":       "tool",
 		})
 	case *protocol.StateSnapshotEvent:
 		return writeSSE(w, map[string]any{
-			"type":     "StateSnapshot",
+			"type":     "STATE_SNAPSHOT",
 			"snapshot": e.Snapshot,
 		})
 	case *protocol.StateDeltaEvent:
 		return writeSSE(w, map[string]any{
-			"type":  "StateDelta",
+			"type":  "STATE_DELTA",
 			"delta": e.Delta,
 		})
-	case *protocol.ThinkingEvent:
+	case *protocol.ReasoningStartEvent:
 		return writeSSE(w, map[string]any{
-			"type":  "Reasoning",
-			"delta": e.Delta,
+			"type":      "REASONING_START",
+			"messageId": e.MessageID,
+		})
+	case *protocol.ReasoningMessageStartEvent:
+		return writeSSE(w, map[string]any{
+			"type":      "REASONING_MESSAGE_START",
+			"messageId": e.MessageID,
+			"role":      e.Role,
+		})
+	case *protocol.ReasoningMessageContentEvent:
+		return writeSSE(w, map[string]any{
+			"type":      "REASONING_MESSAGE_CONTENT",
+			"messageId": e.MessageID,
+			"delta":     e.Delta,
+		})
+	case *protocol.ReasoningMessageEndEvent:
+		return writeSSE(w, map[string]any{
+			"type":      "REASONING_MESSAGE_END",
+			"messageId": e.MessageID,
+		})
+	case *protocol.ReasoningEndEvent:
+		return writeSSE(w, map[string]any{
+			"type":      "REASONING_END",
+			"messageId": e.MessageID,
 		})
 	case *protocol.RunFinishedEvent:
 		return writeSSE(w, map[string]any{
-			"type":     "RunFinished",
+			"type":     "RUN_FINISHED",
 			"threadId": e.ThreadID,
 			"runId":    e.RunID,
 		})
 	case *protocol.RunErrorEvent:
 		return writeSSE(w, map[string]any{
-			"type":    "RunError",
+			"type":    "RUN_ERROR",
 			"message": e.Message,
 			"code":    e.Code,
 		})

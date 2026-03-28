@@ -35,7 +35,11 @@ const (
 	EventStateDelta    EventType = "state-delta"
 
 	// Thinking/reasoning
-	EventThinking EventType = "thinking"
+	EventReasoningStart         EventType = "reasoning-start"
+	EventReasoningMessageStart  EventType = "reasoning-message-start"
+	EventReasoningMessageDelta  EventType = "reasoning-message-delta"
+	EventReasoningMessageEnd    EventType = "reasoning-message-end"
+	EventReasoningEnd           EventType = "reasoning-end"
 
 	// Terminal
 	EventError EventType = "error"
@@ -141,12 +145,42 @@ type StateDeltaEvent struct {
 
 func (e *StateDeltaEvent) Type() EventType { return EventStateDelta }
 
-type ThinkingEvent struct {
+// ReasoningStart marks the beginning of a reasoning process.
+type ReasoningStartEvent struct {
+	MessageID string
+}
+
+func (e *ReasoningStartEvent) Type() EventType { return EventReasoningStart }
+
+// ReasoningMessageStart signals the start of a visible reasoning message.
+type ReasoningMessageStartEvent struct {
+	MessageID string
+	Role      string
+}
+
+func (e *ReasoningMessageStartEvent) Type() EventType { return EventReasoningMessageStart }
+
+// ReasoningMessageContent delivers a chunk of reasoning text.
+type ReasoningMessageContentEvent struct {
 	MessageID string
 	Delta     string
 }
 
-func (e *ThinkingEvent) Type() EventType { return EventThinking }
+func (e *ReasoningMessageContentEvent) Type() EventType { return EventReasoningMessageDelta }
+
+// ReasoningMessageEnd signals the end of a reasoning message.
+type ReasoningMessageEndEvent struct {
+	MessageID string
+}
+
+func (e *ReasoningMessageEndEvent) Type() EventType { return EventReasoningMessageEnd }
+
+// ReasoningEnd marks the end of the reasoning process.
+type ReasoningEndEvent struct {
+	MessageID string
+}
+
+func (e *ReasoningEndEvent) Type() EventType { return EventReasoningEnd }
 
 type ErrorEvent struct {
 	Err error

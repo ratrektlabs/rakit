@@ -50,7 +50,7 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"toolCallId": e.ToolCallID,
 			"output":     e.Result,
 		})
-	case *protocol.ThinkingEvent:
+	case *protocol.ReasoningMessageContentEvent:
 		return writeData(w, map[string]any{
 			"type":  "reasoning",
 			"delta": e.Delta,

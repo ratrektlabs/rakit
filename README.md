@@ -1,4 +1,6 @@
-# rakit
+# 🛶 rakit
+
+> *Rakit* means bamboo raft in Indonesian — a simple, sturdy vessel that carries you across the river. Built from natural materials, flexible yet reliable. That's what this framework aims to be for AI agents.
 
 **R**emote **A**gent **K**it — a Go framework for building AI agents that stream to any frontend, with persistence out of the box.
 
@@ -229,10 +231,6 @@ Both implement the same `provider.Provider` interface — swap freely. Model is 
 |---------|-------------|---------|
 | [examples/local](examples/local) | Local dev server | SQLite + Local FS |
 | [examples/cloud-run](examples/cloud-run) | Cloud Run deployment | MongoDB + S3 |
-
-## Status
-
-Active development. API may change before v1.0.
 
 ## License
 

@@ -1,0 +1,78 @@
+package agent
+
+import (
+	"crypto/rand"
+	"fmt"
+
+	"github.com/ratrektlabs/rl-agent/protocol"
+	"github.com/ratrektlabs/rl-agent/provider"
+	"github.com/ratrektlabs/rl-agent/skill"
+	"github.com/ratrektlabs/rl-agent/storage/blob"
+	"github.com/ratrektlabs/rl-agent/storage/metadata"
+	"github.com/ratrektlabs/rl-agent/tool"
+)
+
+// Agent is the core runtime that orchestrates providers, protocols, and tools.
+type Agent struct {
+	ID       string
+	Provider provider.Provider
+	Protocol protocol.Protocol
+	Tools    *tool.Registry
+	Skills   *skill.Registry
+	Store    metadata.Store
+	FS       blob.BlobStore
+	hooks    []Hook
+}
+
+// Option configures an Agent.
+type Option func(*Agent)
+
+func WithProvider(p provider.Provider) Option {
+	return func(a *Agent) { a.Provider = p }
+}
+
+func WithProtocol(p protocol.Protocol) Option {
+	return func(a *Agent) { a.Protocol = p }
+}
+
+func WithStore(s metadata.Store) Option {
+	return func(a *Agent) {
+		a.Store = s
+		a.Skills = skill.NewRegistry(s)
+	}
+}
+
+func WithFS(fs blob.BlobStore) Option {
+	return func(a *Agent) { a.FS = fs }
+}
+
+func WithTools(tools ...tool.Tool) Option {
+	return func(a *Agent) {
+		for _, t := range tools {
+			a.Tools.Register(t)
+		}
+	}
+}
+
+func WithHooks(hooks ...Hook) Option {
+	return func(a *Agent) { a.hooks = append(a.hooks, hooks...) }
+}
+
+// New creates a new Agent with the given options.
+func New(opts ...Option) *Agent {
+	a := &Agent{
+		ID:    generateID(),
+		Tools: tool.NewRegistry(),
+		hooks: make([]Hook, 0),
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
+}
+
+func generateID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}

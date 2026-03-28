@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/ratrektlabs/rl-agent/agent"
-	"github.com/ratrektlabs/rl-agent/protocol"
-	"github.com/ratrektlabs/rl-agent/protocol/aisdk"
-	"github.com/ratrektlabs/rl-agent/provider/gemini"
-	"github.com/ratrektlabs/rl-agent/skill"
-	blobLocal "github.com/ratrektlabs/rl-agent/storage/blob/local"
-	metaSQLite "github.com/ratrektlabs/rl-agent/storage/metadata/sqlite"
+	"github.com/ratrektlabs/rakit/agent"
+	"github.com/ratrektlabs/rakit/protocol"
+	"github.com/ratrektlabs/rakit/protocol/aisdk"
+	"github.com/ratrektlabs/rakit/provider/gemini"
+	"github.com/ratrektlabs/rakit/skill"
+	blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
+	metaSQLite "github.com/ratrektlabs/rakit/storage/metadata/sqlite"
 )
 
 func main() {

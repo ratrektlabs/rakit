@@ -3,7 +3,7 @@ package skill
 import (
 	"context"
 
-	"github.com/ratrektlabs/rl-agent/storage/blob"
+	"github.com/ratrektlabs/rakit/storage/blob"
 )
 
 // ResourceManager loads L3 resources from blob store on demand.

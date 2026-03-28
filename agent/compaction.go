@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ratrektlabs/rl-agent/provider"
-	"github.com/ratrektlabs/rl-agent/storage/metadata"
+	"github.com/ratrektlabs/rakit/provider"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 )
 
 // CompactionConfig controls when and how conversation history is compacted.

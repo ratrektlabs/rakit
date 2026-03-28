@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/ratrektlabs/rl-agent/protocol"
+	"github.com/ratrektlabs/rakit/protocol"
 )
 
 // Protocol implements the Vercel AI SDK streaming format.

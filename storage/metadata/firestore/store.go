@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/ratrektlabs/rl-agent/storage/metadata"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 	"google.golang.org/api/iterator"
 )
 

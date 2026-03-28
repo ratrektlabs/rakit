@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/ratrektlabs/rl-agent/provider"
+	"github.com/ratrektlabs/rakit/provider"
 )
 
 // Provider implements the Gemini LLM backend.

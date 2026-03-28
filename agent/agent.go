@@ -5,12 +5,12 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"github.com/ratrektlabs/rl-agent/protocol"
-	"github.com/ratrektlabs/rl-agent/provider"
-	"github.com/ratrektlabs/rl-agent/skill"
-	"github.com/ratrektlabs/rl-agent/storage/blob"
-	"github.com/ratrektlabs/rl-agent/storage/metadata"
-	"github.com/ratrektlabs/rl-agent/tool"
+	"github.com/ratrektlabs/rakit/protocol"
+	"github.com/ratrektlabs/rakit/provider"
+	"github.com/ratrektlabs/rakit/skill"
+	"github.com/ratrektlabs/rakit/storage/blob"
+	"github.com/ratrektlabs/rakit/storage/metadata"
+	"github.com/ratrektlabs/rakit/tool"
 )
 
 // Agent is the core runtime that orchestrates providers, protocols, and tools.

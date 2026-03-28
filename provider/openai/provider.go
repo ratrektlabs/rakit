@@ -7,7 +7,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 
-	"github.com/ratrektlabs/rl-agent/provider"
+	"github.com/ratrektlabs/rakit/provider"
 )
 
 // Provider implements the OpenAI LLM backend.

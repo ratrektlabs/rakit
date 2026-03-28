@@ -1,4 +1,4 @@
-module github.com/ratrektlabs/rl-agent
+module github.com/ratrektlabs/rakit
 
 go 1.25.0
 

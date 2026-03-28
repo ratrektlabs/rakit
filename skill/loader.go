@@ -3,7 +3,7 @@ package skill
 import (
 	"context"
 
-	"github.com/ratrektlabs/rl-agent/tool"
+	"github.com/ratrektlabs/rakit/tool"
 )
 
 // Loader fetches L2 definitions from the metadata store and converts them

@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/ratrektlabs/rl-agent/agent"
-	"github.com/ratrektlabs/rl-agent/protocol"
-	"github.com/ratrektlabs/rl-agent/protocol/aisdk"
-	"github.com/ratrektlabs/rl-agent/provider/openai"
-	"github.com/ratrektlabs/rl-agent/skill"
-	blobS3 "github.com/ratrektlabs/rl-agent/storage/blob/s3"
-	metaMongo "github.com/ratrektlabs/rl-agent/storage/metadata/mongo"
+	"github.com/ratrektlabs/rakit/agent"
+	"github.com/ratrektlabs/rakit/protocol"
+	"github.com/ratrektlabs/rakit/protocol/aisdk"
+	"github.com/ratrektlabs/rakit/provider/openai"
+	"github.com/ratrektlabs/rakit/skill"
+	blobS3 "github.com/ratrektlabs/rakit/storage/blob/s3"
+	metaMongo "github.com/ratrektlabs/rakit/storage/metadata/mongo"
 )
 
 func main() {

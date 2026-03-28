@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ratrektlabs/rl-agent/storage/metadata"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 
 	_ "modernc.org/sqlite"
 )

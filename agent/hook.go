@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"github.com/ratrektlabs/rl-agent/protocol"
+	"github.com/ratrektlabs/rakit/protocol"
 )
 
 // Hook provides observability callbacks for agent events.

@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/ratrektlabs/rl-agent/protocol"
-	"github.com/ratrektlabs/rl-agent/provider"
-	"github.com/ratrektlabs/rl-agent/storage/metadata"
+	"github.com/ratrektlabs/rakit/protocol"
+	"github.com/ratrektlabs/rakit/provider"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 )
 
 // Run starts the agent with its default protocol (no session persistence).

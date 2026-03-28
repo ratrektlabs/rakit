@@ -10,7 +10,7 @@ import (
 	"cloud.google.com/go/storage"
 	firebase "firebase.google.com/go/v4"
 	fbStorage "firebase.google.com/go/v4/storage"
-	"github.com/ratrektlabs/rl-agent/storage/blob"
+	"github.com/ratrektlabs/rakit/storage/blob"
 	"google.golang.org/api/iterator"
 )
 

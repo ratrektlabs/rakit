@@ -11,7 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/ratrektlabs/rl-agent/storage/blob"
+	"github.com/ratrektlabs/rakit/storage/blob"
 )
 
 // Store implements blob.BlobStore backed by an S3-compatible bucket.

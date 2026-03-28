@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/ratrektlabs/rl-agent/storage/metadata"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 )
 
 // Registry manages L1 skill entries backed by the metadata store.

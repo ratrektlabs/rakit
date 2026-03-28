@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ratrektlabs/rl-agent/storage/blob"
+	"github.com/ratrektlabs/rakit/storage/blob"
 )
 
 var _ blob.BlobStore = (*Store)(nil)

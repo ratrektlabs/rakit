@@ -34,12 +34,12 @@ func renderMessages(messages []Message, width int) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(renderMessage(msg, width))
+		b.WriteString(renderMessage(msg))
 	}
 	return b.String()
 }
 
-func renderMessage(msg Message, width int) string {
+func renderMessage(msg Message) string {
 	switch msg.Role {
 	case roleUser:
 		return fmt.Sprintf("\n%s %s",
@@ -50,7 +50,7 @@ func renderMessage(msg Message, width int) string {
 	case roleAssistant:
 		content := msg.Content
 		if content == "" {
-			return assistantLabelStyle.Render("Assistant:") + dimStyle.Render(" ...")
+			return assistantLabelStyle.Render("Assistant:")
 		}
 		return fmt.Sprintf("\n%s %s",
 			assistantLabelStyle.Render("Assistant:"),
@@ -61,7 +61,7 @@ func renderMessage(msg Message, width int) string {
 		return "\n" + systemMsgStyle.Render(msg.Content)
 
 	case roleToolStart:
-		return toolMsgStyle.Render(fmt.Sprintf("  ⚙ Running %s...", msg.ToolName))
+		return toolMsgStyle.Render(fmt.Sprintf("  Running %s...", msg.ToolName))
 
 	case roleToolEnd:
 		result := msg.Content
@@ -69,9 +69,9 @@ func renderMessage(msg Message, width int) string {
 			result = result[:150] + "..."
 		}
 		if result != "" {
-			return toolDoneStyle.Render(fmt.Sprintf("  ✓ Done") + " " + dimStyle.Render(result))
+			return toolDoneStyle.Render("  Done") + " " + dimStyle.Render(result)
 		}
-		return toolDoneStyle.Render("  ✓ Done")
+		return toolDoneStyle.Render("  Done")
 
 	default:
 		return msg.Content

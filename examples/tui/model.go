@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -28,6 +29,9 @@ var slashSuggestions = []string{
 	"/model ",
 }
 
+// spinnerFrames is a simple spinner animation.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 // Model is the root Bubble Tea model — a single conversation view.
 type Model struct {
 	client    *Client
@@ -43,6 +47,13 @@ type Model struct {
 	width        int
 	height       int
 	ready        bool
+
+	// Spinner state
+	spinnerIdx   int
+	inputTokens  int // approximate input chars
+	outputTokens int // approximate output chars
+	lastDuration time.Duration
+	streamStart  time.Time
 }
 
 func newModel(c *Client) Model {
@@ -82,6 +93,15 @@ func (m Model) loadProviderInfo() tea.Cmd {
 	}
 }
 
+// tickSpinnerMsg is sent on a timer to animate the spinner.
+type tickSpinnerMsg time.Time
+
+func tickSpinner() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickSpinnerMsg(t)
+	})
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -102,7 +122,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = false
 				m.cancelStream = nil
 				m.streamCh = nil
-				m.appendSystem("Stream cancelled.")
+				m.appendSystem("Cancelled.")
 				return m, nil
 			}
 			return m, func() tea.Msg { return tea.Quit() }
@@ -116,29 +136,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.SetValue("")
 
-			// Check for slash command
+			// Slash command
 			if cmd, args, ok := parseSlashCommand(val); ok {
 				return m, m.handleSlashCommand(cmd, args)
 			}
 
-			// Regular chat message
+			// Chat message
+			m.inputTokens += len(val)
 			m.messages = append(m.messages, Message{Role: roleUser, Content: val})
 			m.syncViewport()
 			return m, m.startChat(val)
 		}
+
+	// --- Spinner tick ---
+	case tickSpinnerMsg:
+		if m.streaming {
+			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
+			return m, tickSpinner()
+		}
+		return m, nil
 
 	// --- Stream messages ---
 	case streamStartedMsg:
 		m.streaming = true
 		m.streamCh = msg.ch
 		m.cancelStream = msg.cancel
+		m.streamStart = time.Now()
 		m.messages = append(m.messages, Message{Role: roleAssistant, Content: ""})
 		m.syncViewport()
-		return m, waitForStreamMsg(msg.ch)
+		return m, tea.Batch(waitForStreamMsg(msg.ch), tickSpinner())
 
 	case streamDeltaMsg:
 		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == roleAssistant {
 			m.messages[len(m.messages)-1].Content += msg.delta
+			m.outputTokens += len(msg.delta)
 		}
 		m.syncViewport()
 		return m, waitForStreamMsg(m.streamCh)
@@ -156,15 +187,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamToolResultMsg:
 		result := msg.output
-		if len(result) > 200 {
-			result = result[:200] + "..."
+		if len(result) > 150 {
+			result = result[:150] + "..."
 		}
-		m.messages = append(m.messages, Message{Role: roleToolEnd, ToolName: "", Content: result})
+		m.messages = append(m.messages, Message{Role: roleToolEnd, Content: result})
 		m.syncViewport()
 		return m, waitForStreamMsg(m.streamCh)
 
 	case streamDoneMsg:
 		m.streaming = false
+		m.lastDuration = time.Since(m.streamStart)
 		if m.cancelStream != nil {
 			m.cancelStream()
 		}
@@ -197,7 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionCreatedMsg:
 		m.sessionID = msg.id
-		m.appendSystem(fmt.Sprintf("Session created: %s", msg.id))
+		m.appendSystem(fmt.Sprintf("Session: %s", msg.id))
 		return m, nil
 
 	case sessionCreatedAndChatMsg:
@@ -252,27 +284,37 @@ func (m Model) View() tea.View {
 		sessionStr = m.sessionID
 	}
 
-	var indicator string
+	var spinner string
 	if m.streaming {
-		indicator = spinnerStyle.Render("...")
-	} else {
-		indicator = " "
+		spinner = spinnerFrames[m.spinnerIdx] + " "
 	}
 
-	statusText := fmt.Sprintf(" %s %s | %s | /help for commands",
-		indicator, modelStyle.Render(modelStr), dimStyle.Render("session: "+sessionStr))
+	// Token stats
+	tokenInfo := ""
+	if m.outputTokens > 0 {
+		tokenInfo = fmt.Sprintf(" | out: %d", m.outputTokens)
+	}
+	if m.lastDuration > 0 && !m.streaming {
+		tokenInfo += fmt.Sprintf(" | %.1fs", m.lastDuration.Seconds())
+	}
+
+	statusText := fmt.Sprintf(" %s%s | session: %s%s",
+		spinner,
+		modelStyle.Render(modelStr),
+		dimStyle.Render(sessionStr),
+		dimStyle.Render(tokenInfo),
+	)
 	status := statusBarStyle.Render(statusText)
 
 	// Input line
 	var inputLine string
 	if m.streaming {
-		inputLine = dimStyle.Render("  waiting...")
+		inputLine = dimStyle.Render("  " + spinnerFrames[m.spinnerIdx] + "  thinking...")
 	} else {
 		inputLine = promptStyle.Render("> ") + m.input.View()
 	}
 
-	// Separator between viewport and status
 	sep := separatorStyle.Render(strings.Repeat("─", max(m.width, 1)))
 
-	return tea.NewView(fmt.Sprintf("%s\n%s\n%s\n%s", m.viewport.View(), sep, status, inputLine))
+	return tea.NewView(fmt.Sprintf("%s\n%s\n%s", m.viewport.View(), sep, status) + "\n" + inputLine)
 }

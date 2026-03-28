@@ -15,10 +15,7 @@ var (
 			Foreground(lipgloss.Color("#7D56F4")).
 			Bold(true)
 
-	spinnerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFB86C"))
-
-	// --- Messages ---
+	// --- Message roles ---
 	userLabelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8BE9FD")).
 			Bold(true)
@@ -39,7 +36,7 @@ var (
 	toolDoneStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#50FA7B"))
 
-	// --- Status bar components ---
+	// --- Status bar ---
 	modelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8BE9FD")).
 			Bold(true)
@@ -53,13 +50,4 @@ var (
 
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#50FA7B"))
-
-	highlightStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFB86C"))
-
-	// --- Legacy (kept for commands.go compatibility) ---
-	titleStyle      = lipgloss.NewStyle()
-	tabStyle        = lipgloss.NewStyle()
-	activeTabStyle  = lipgloss.NewStyle()
-	borderStyle     = lipgloss.NewStyle()
 )

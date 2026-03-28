@@ -8,10 +8,13 @@
 
 - Multi-provider LLM support (OpenAI, Gemini)
 - Dual protocol streaming (AG-UI / CopilotKit, Vercel AI SDK)
+- **Agentic loop** — tools execute and results feed back automatically until the agent is done
 - Session persistence with automatic compaction
 - 3-layer skill system (registration -> prompt -> resources)
 - Pluggable storage (SQLite, Firestore, MongoDB + S3, Firebase, local FS)
 - Content negotiation — one agent, any frontend
+- **Admin REST API** — manage sessions, skills, tools, memory, and provider at runtime
+- **TUI client** — Claude Code-like terminal interface with slash commands and streaming
 
 ## Install
 
@@ -27,6 +30,7 @@ package main
 import (
     "context"
     "fmt"
+    "net/http"
     "github.com/ratrektlabs/rakit/agent"
     "github.com/ratrektlabs/rakit/protocol/aisdk"
     "github.com/ratrektlabs/rakit/provider/openai"
@@ -49,12 +53,18 @@ func main() {
         agent.WithFS(fs),
     )
 
-    // Session-aware run with persistence and compaction
+    // Session-aware run with agentic loop (tools execute automatically)
     sess, _ := a.CreateSession(ctx)
     events, _ := a.RunWithSession(ctx, sess.ID, "Hello!", aisdk.New())
     for e := range events {
         fmt.Println(e)
     }
+
+    // Or expose as HTTP server with admin API
+    mux := http.NewServeMux()
+    mux.HandleFunc("/chat", myChatHandler)
+    agent.RegisterHandlers(mux, a)  // /api/v1/* admin endpoints
+    http.ListenAndServe(":8080", mux)
 }
 ```
 
@@ -199,7 +209,11 @@ p := openai.New("gpt-5.4", apiKey)    // or gpt-5.4-mini, gpt-5.4-nano
 p, _ := gemini.New("gemini-3.1-pro-preview", apiKey)
 ```
 
-Both implement the same `provider.Provider` interface — swap freely. Model is selected at construction time.
+Both implement the same `provider.Provider` interface — swap freely. Model can be changed at runtime:
+
+```go
+p.SetModel("gemini-2.0-flash")
+```
 
 ## Storage Adapters
 
@@ -229,7 +243,8 @@ Both implement the same `provider.Provider` interface — swap freely. Model is 
 
 | Example | Description | Storage |
 |---------|-------------|---------|
-| [examples/local](examples/local) | Local dev server | SQLite + Local FS |
+| [examples/local](examples/local) | Local dev server with admin API | SQLite + Local FS |
+| [examples/tui](examples/tui) | Claude Code-like TUI client (Bubble Tea) | Connects via HTTP |
 | [examples/cloud-run](examples/cloud-run) | Cloud Run deployment | MongoDB + S3 |
 
 ## License

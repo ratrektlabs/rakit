@@ -43,6 +43,12 @@ func (a *Agent) RunWithProtocol(
 	go func() {
 		defer close(events)
 
+		threadID := generateID()
+		runID := generateID()
+
+		// Emit RunStarted
+		events <- &protocol.RunStartedEvent{ThreadID: threadID, RunID: runID}
+
 		req := &provider.Request{
 			Model:    a.Provider.Model(),
 			Messages: []provider.Message{{Role: "user", Content: input}},
@@ -55,7 +61,17 @@ func (a *Agent) RunWithProtocol(
 			return
 		}
 
+		var textMessageID string
+		textStarted := false
+
 		for event := range stream {
+			// Emit TextStart before first text delta
+			if _, ok := event.(*provider.TextDeltaEvent); ok && !textStarted {
+				textStarted = true
+				textMessageID = generateID()
+				events <- &protocol.TextStartEvent{MessageID: textMessageID, Role: "assistant"}
+			}
+
 			protoEvent := convertEvent(event)
 			if protoEvent == nil {
 				continue
@@ -69,6 +85,14 @@ func (a *Agent) RunWithProtocol(
 
 			events <- protoEvent
 		}
+
+		// Emit TextEnd if we started a text message
+		if textStarted {
+			events <- &protocol.TextEndEvent{MessageID: textMessageID}
+		}
+
+		// Emit RunFinished
+		events <- &protocol.RunFinishedEvent{ThreadID: threadID, RunID: runID}
 	}()
 
 	return events, nil
@@ -133,6 +157,10 @@ func (a *Agent) RunWithSession(
 	go func() {
 		defer close(events)
 
+		threadID := sess.ID
+		runID := generateID()
+		events <- &protocol.RunStartedEvent{ThreadID: threadID, RunID: runID}
+
 		// Build initial provider messages from session history
 		providerMsgs := metadataToProviderMessages(sess.Messages)
 
@@ -161,10 +189,23 @@ func (a *Agent) RunWithSession(
 			// Accumulate response
 			var responseContent string
 			var responseToolCalls []provider.ToolCall
+			var textMessageID string
+			textStarted := false
 
 			for event := range stream {
 				switch ev := event.(type) {
 				case *provider.TextDeltaEvent:
+					if !textStarted {
+						textStarted = true
+						textMessageID = generateID()
+						startEvt := &protocol.TextStartEvent{MessageID: textMessageID, Role: "assistant"}
+						for _, h := range a.hooks {
+							if err := h.OnEvent(ctx, startEvt); err != nil {
+								events <- &protocol.ErrorEvent{Err: err}
+							}
+						}
+						events <- startEvt
+					}
 					responseContent += ev.Delta
 				case *provider.ToolCallEvent:
 					responseToolCalls = append(responseToolCalls, provider.ToolCall{
@@ -186,6 +227,17 @@ func (a *Agent) RunWithSession(
 				}
 
 				events <- protoEvent
+			}
+
+			// Emit TextEnd if we started a text message
+			if textStarted {
+				endEvt := &protocol.TextEndEvent{MessageID: textMessageID}
+				for _, h := range a.hooks {
+					if err := h.OnEvent(ctx, endEvt); err != nil {
+						events <- &protocol.ErrorEvent{Err: err}
+					}
+				}
+				events <- endEvt
 			}
 
 			// No tool calls — final response, save and break
@@ -274,6 +326,9 @@ func (a *Agent) RunWithSession(
 				}
 			}
 		}
+
+		// Emit RunFinished
+		events <- &protocol.RunFinishedEvent{ThreadID: threadID, RunID: runID}
 
 		// Save session (use Background context to survive request cancellation)
 		if err := a.Store.UpdateSession(context.Background(), sess); err != nil {

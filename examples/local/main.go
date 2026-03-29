@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +19,9 @@ import (
 	blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
 	metaSQLite "github.com/ratrektlabs/rakit/storage/metadata/sqlite"
 )
+
+//go:embed index.html
+var frontendFS embed.FS
 
 func main() {
 	ctx := context.Background()
@@ -36,7 +41,7 @@ func main() {
 	}
 	defer store.Close()
 
-	fs, err := blobLocal.New("./data/workspace")
+	blobStore, err := blobLocal.New("./data/workspace")
 	if err != nil {
 		log.Fatalf("Failed to create local blob store: %v", err)
 	}
@@ -52,7 +57,7 @@ func main() {
 		agent.WithProvider(prov),
 		agent.WithProtocol(aisdk.New()),
 		agent.WithStore(store),
-		agent.WithFS(fs),
+		agent.WithFS(blobStore),
 	)
 
 	// Register a skill
@@ -117,7 +122,6 @@ func main() {
 		}
 
 		if err := p.EncodeStream(r.Context(), w, events); err != nil {
-			// Client disconnect is normal, don't log it
 			if r.Context().Err() == nil {
 				log.Printf("Stream error: %v", err)
 			}
@@ -127,14 +131,15 @@ func main() {
 	// Admin API
 	registerAdminHandlers(mux, a)
 
-	// Frontend static files
-	mux.Handle("/", http.FileServer(http.Dir("../frontend")))
+	// Frontend — serve embedded index.html at /
+	dist, _ := fs.Sub(frontendFS, ".")
+	mux.Handle("GET /", http.FileServer(http.FS(dist)))
 
 	addr := ":8080"
 	fmt.Printf("Agent server listening on %s\n", addr)
 	fmt.Println("Data stored in ./data/")
 	fmt.Println("Admin API at /api/v1/")
-	fmt.Println("Dashboard at http://localhost" + addr)
+	fmt.Printf("Dashboard at http://localhost%s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, corsMiddleware(requestLogger(mux))))
 }
 

@@ -1582,6 +1582,19 @@ async function deleteMemory(key) {
 // ═══════════════════════════════════
 // PROVIDER
 // ═══════════════════════════════════
+const PROVIDERS = {
+  gemini: {
+    name: 'Google Gemini',
+    models: ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite-preview'],
+    envKey: 'GEMINI_API_KEY',
+  },
+  openai: {
+    name: 'OpenAI',
+    models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano'],
+    envKey: 'OPENAI_API_KEY',
+  },
+};
+
 async function renderProvider(c) {
   c.innerHTML = '<div class="empty-state"><p>Loading provider info...</p></div>';
 
@@ -1590,28 +1603,64 @@ async function renderProvider(c) {
     state.provider = data;
 
     const models = data.models || [];
+    const currentProvider = data.provider || 'gemini';
+    const provDef = PROVIDERS[currentProvider] || { name: currentProvider, models, envKey: '' };
+
     c.innerHTML = `
+      <!-- Current status -->
       <div class="provider-grid">
         <div class="provider-card">
-          <h3>Current Provider</h3>
-          <div class="provider-value">${data.provider || '—'}</div>
-          <div class="provider-label">Provider name</div>
+          <h3>Active Provider</h3>
+          <div class="provider-value">${provDef.name || currentProvider}</div>
+          <div class="provider-label">${currentProvider}</div>
         </div>
         <div class="provider-card">
           <h3>Active Model</h3>
-          <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+          <div class="provider-value" style="color:var(--accent);font-family:'IBM Plex Mono',monospace;font-size:16px">${data.model || '—'}</div>
+          <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
             <select id="provider-model-select" style="flex:1">
               ${models.map(m => `<option value="${m}" ${m === data.model ? 'selected' : ''}>${m}</option>`).join('')}
+              <option value="__custom">Custom model...</option>
             </select>
             <button class="btn btn-primary btn-sm" onclick="setModel()">Apply</button>
           </div>
-          <div class="provider-label">Select a model and click Apply</div>
         </div>
       </div>
+
+      <!-- Switch provider -->
+      <div class="card" style="margin-top:20px">
+        <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:16px">Switch Provider</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Provider</label>
+            <select id="prov-switch-name" onchange="onProviderSwitchChange()">
+              ${Object.entries(PROVIDERS).map(([k, v]) => `<option value="${k}" ${k === currentProvider ? 'selected' : ''}>${v.name}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label">API Key</label>
+            <input type="password" id="prov-switch-key" placeholder="Enter API key...">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Model</label>
+            <input type="text" id="prov-switch-model" value="${data.model || ''}" placeholder="Model name...">
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <button class="btn btn-primary" onclick="switchProvider()" style="width:100%">Switch Provider</button>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:12px;color:var(--text-muted)">
+          This replaces the active provider and model. The API key is not stored permanently.
+        </div>
+      </div>
+
+      <!-- Available models -->
       <div class="card" style="margin-top:20px">
         <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:16px">Available Models</h3>
         <ul class="model-list">
-          ${models.map(m => `<li class="${m === data.model ? 'active' : ''}">${m}${m === data.model ? ' <span style="font-size:11px;color:var(--text-muted)"> (active)</span>' : ''}</li>`).join('')}
+          ${models.map(m => `<li class="${m === data.model ? 'active' : ''}" style="cursor:pointer" onclick="quickSetModel('${m}')">${m}${m === data.model ? ' <span style="font-size:11px;color:var(--text-muted)"> (active)</span>' : ''}</li>`).join('')}
         </ul>
       </div>`;
   } catch (e) {
@@ -1619,12 +1668,57 @@ async function renderProvider(c) {
   }
 }
 
+function onProviderSwitchChange() {
+  const sel = document.getElementById('prov-switch-name');
+  const modelInput = document.getElementById('prov-switch-model');
+  const provDef = PROVIDERS[sel.value];
+  if (provDef && provDef.models.length) {
+    modelInput.value = provDef.models[0];
+  }
+}
+
 async function setModel() {
-  const model = document.getElementById('provider-model-select').value;
-  if (!model) return;
+  let model = document.getElementById('provider-model-select').value;
+  if (model === '__custom') {
+    model = prompt('Enter custom model name:');
+    if (!model) return;
+  }
   try {
     await API.put('/api/v1/provider/model', { model });
     toast('Model set to ' + model, 'success');
+    renderProvider(document.getElementById('main-content'));
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+async function quickSetModel(model) {
+  try {
+    await API.put('/api/v1/provider/model', { model });
+    toast('Model set to ' + model, 'success');
+    renderProvider(document.getElementById('main-content'));
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+async function switchProvider() {
+  const provider = document.getElementById('prov-switch-name').value;
+  const apiKey = document.getElementById('prov-switch-key').value;
+  const model = document.getElementById('prov-switch-model').value;
+
+  if (!apiKey) {
+    toast('API key is required', 'error');
+    return;
+  }
+  if (!model) {
+    toast('Model is required', 'error');
+    return;
+  }
+
+  try {
+    const data = await API.put('/api/v1/provider', { provider, apiKey, model });
+    toast(`Switched to ${data.provider} / ${data.model}`, 'success');
     renderProvider(document.getElementById('main-content'));
   } catch (e) {
     toast('Failed: ' + e.message, 'error');

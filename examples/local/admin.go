@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/ratrektlabs/rakit/agent"
+	"github.com/ratrektlabs/rakit/provider"
+	"github.com/ratrektlabs/rakit/provider/gemini"
+	"github.com/ratrektlabs/rakit/provider/openai"
 	"github.com/ratrektlabs/rakit/storage/metadata"
 )
 
@@ -44,6 +47,7 @@ func registerAdminHandlers(mux *http.ServeMux, a *agent.Agent) {
 	// Provider
 	mux.HandleFunc("GET /api/v1/provider", h.getProvider)
 	mux.HandleFunc("PUT /api/v1/provider/model", h.setModel)
+	mux.HandleFunc("PUT /api/v1/provider", h.setProvider)
 }
 
 type adminHandler struct {
@@ -440,4 +444,44 @@ func (h *adminHandler) setModel(w http.ResponseWriter, r *http.Request) {
 	}
 	h.agent.Provider.SetModel(body.Model)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": body.Model})
+}
+
+func (h *adminHandler) setProvider(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Provider string `json:"provider"`
+		APIKey   string `json:"apiKey"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		return
+	}
+	if body.Provider == "" || body.APIKey == "" {
+		writeError(w, http.StatusBadRequest, "missing provider or apiKey")
+		return
+	}
+
+	var p provider.Provider
+	var err error
+	switch body.Provider {
+	case "gemini":
+		p, err = gemini.New(body.Model, body.APIKey)
+	case "openai":
+		p = openai.New(body.Model, body.APIKey)
+	default:
+		writeError(w, http.StatusBadRequest, "unknown provider: "+body.Provider)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create provider: %v", err))
+		return
+	}
+
+	h.agent.Provider = p
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"provider": p.Name(),
+		"model":    p.Model(),
+		"models":   p.Models(),
+	})
 }

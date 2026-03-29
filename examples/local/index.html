@@ -532,6 +532,23 @@ input::placeholder,textarea::placeholder{color:var(--text-muted)}
 }
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 
+/* Thinking dots animation */
+.thinking-dots{
+  display:inline-flex;gap:4px;align-items:center;padding:4px 0;
+}
+.thinking-dots span{
+  width:6px;height:6px;
+  border-radius:50%;
+  background:var(--text-muted);
+  animation:dotPulse 1.4s ease-in-out infinite;
+}
+.thinking-dots span:nth-child(2){animation-delay:0.2s}
+.thinking-dots span:nth-child(3){animation-delay:0.4s}
+@keyframes dotPulse{
+  0%,80%,100%{opacity:0.3;transform:scale(0.8)}
+  40%{opacity:1;transform:scale(1.1)}
+}
+
 .chat-input-bar{
   display:flex;gap:8px;
   padding-top:16px;
@@ -1045,18 +1062,23 @@ async function sendChat() {
   appendChatMsg('user', msg);
 
   state.streaming = true;
-  document.getElementById('chat-status').textContent = 'Streaming...';
+  document.getElementById('chat-status').textContent = 'Thinking...';
   document.getElementById('chat-send-btn').disabled = true;
 
+  // Show thinking indicator (animated dots)
   const assistantEl = appendChatMsg('assistant', '');
-  const cursor = document.createElement('span');
-  cursor.className = 'typing-cursor';
-  assistantEl.appendChild(cursor);
+  const dots = document.createElement('span');
+  dots.className = 'thinking-dots';
+  dots.innerHTML = '<span></span><span></span><span></span>';
+  assistantEl.appendChild(dots);
 
   // Accumulators
   let textAcc = '';
   let toolCalls = {}; // toolCallId -> {name, args, result}
   let renderTimer = null;
+  let firstToken = true;
+  const cursor = document.createElement('span');
+  cursor.className = 'typing-cursor';
 
   function scheduleRender() {
     if (renderTimer) return;
@@ -1104,13 +1126,23 @@ async function sendChat() {
         const data = line.slice(6).trim();
         if (!data) continue;
 
-        if (data === '[DONE]') {
-          // AI SDK done signal
-          continue;
-        }
+        if (data === '[DONE]') continue;
 
         try {
           const event = JSON.parse(data);
+
+          // On first meaningful token, remove thinking dots and start streaming
+          if (firstToken) {
+            const hasText = (state.protocol === 'ai-sdk' && (event.type === 'text-delta' || event.type === 'text'))
+              || (state.protocol === 'ag-ui' && event.type === 'TEXT_MESSAGE_CONTENT');
+            const hasTool = (state.protocol === 'ai-sdk' && event.type === 'tool-input-start')
+              || (state.protocol === 'ag-ui' && event.type === 'TOOL_CALL_START');
+            if (hasText || hasTool) {
+              firstToken = false;
+              dots.remove();
+              document.getElementById('chat-status').textContent = 'Streaming...';
+            }
+          }
 
           if (state.protocol === 'ai-sdk') {
             parseAISDK(event, toolCalls, (delta) => {
@@ -1131,7 +1163,9 @@ async function sendChat() {
     toast('Chat error: ' + e.message, 'error');
   }
 
-  cursor.remove();
+  // Final cleanup
+  if (dots.parentNode) dots.remove();
+  if (cursor.parentNode) cursor.remove();
   renderAssistantContent(assistantEl, textAcc, toolCalls, null);
   scrollChat();
   state.streaming = false;
@@ -1348,24 +1382,33 @@ function toggleSkillDetail(name) {
 
 function openSkillModal() {
   openModal('Register Skill', `
-    <div class="form-group"><label class="form-label">Name</label><input type="text" id="skill-name" placeholder="my-skill"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group"><label class="form-label">Name</label><input type="text" id="skill-name" placeholder="my-skill"></div>
+      <div class="form-group"><label class="form-label">Version</label><input type="text" id="skill-version" placeholder="1.0.0"></div>
+    </div>
     <div class="form-group"><label class="form-label">Description</label><input type="text" id="skill-desc" placeholder="What this skill does"></div>
-    <div class="form-group"><label class="form-label">Version</label><input type="text" id="skill-version" placeholder="1.0.0"></div>
-    <div class="form-group"><label class="form-label">Instructions</label><textarea id="skill-instructions" placeholder="System prompt for the skill"></textarea></div>
+    <div class="form-group"><label class="form-label">Instructions</label><textarea id="skill-instructions" rows="4" placeholder="System prompt / instructions for the skill"></textarea></div>
+    <div class="form-group"><label class="form-label">Tools (JSON array)</label><textarea id="skill-tools" rows="3" placeholder='[{"name":"my-tool","description":"...","handler":"http","endpoint":"https://..."}]'></textarea></div>
+    <div class="form-group"><label class="form-label">Config (JSON object)</label><textarea id="skill-config" rows="2" placeholder='{"key":"value"}'></textarea></div>
+    <div class="form-group"><label class="form-label">Resources (JSON array)</label><textarea id="skill-resources" rows="2" placeholder='[{"uri":"file://...","name":"..."}]'></textarea></div>
   `, `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
      <button class="btn btn-primary" onclick="registerSkill()">Register</button>`);
 }
 
 async function registerSkill() {
   try {
+    let tools = [], config = {}, resources = [];
+    try { tools = JSON.parse(document.getElementById('skill-tools').value || '[]'); } catch {}
+    try { config = JSON.parse(document.getElementById('skill-config').value || '{}'); } catch {}
+    try { resources = JSON.parse(document.getElementById('skill-resources').value || '[]'); } catch {}
     await API.post('/api/v1/skills', {
       name: document.getElementById('skill-name').value,
       description: document.getElementById('skill-desc').value,
       version: document.getElementById('skill-version').value || '1.0.0',
       instructions: document.getElementById('skill-instructions').value,
-      tools: [],
-      config: {},
-      resources: [],
+      tools,
+      config,
+      resources,
     });
     closeModal();
     toast('Skill registered', 'success');
@@ -1432,28 +1475,64 @@ async function renderTools(c) {
 
 function openToolModal() {
   openModal('Add Tool', `
-    <div class="form-group"><label class="form-label">Name</label><input type="text" id="tool-name" placeholder="my-tool"></div>
-    <div class="form-group"><label class="form-label">Description</label><input type="text" id="tool-desc" placeholder="What this tool does"></div>
-    <div class="form-group"><label class="form-label">Handler</label>
-      <select id="tool-handler"><option value="http">HTTP</option></select>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="form-group"><label class="form-label">Name</label><input type="text" id="tool-name" placeholder="my-tool"></div>
+      <div class="form-group"><label class="form-label">Handler</label>
+        <select id="tool-handler" onchange="toggleToolHandlerFields()">
+          <option value="http">HTTP</option>
+          <option value="script">Script</option>
+        </select>
+      </div>
     </div>
-    <div class="form-group"><label class="form-label">Endpoint</label><input type="text" id="tool-endpoint" placeholder="https://..."></div>
-    <div class="form-group"><label class="form-label">Parameters (JSON Schema)</label><textarea id="tool-params" rows="5" placeholder='{"type":"object","properties":{}}'></textarea></div>
+    <div class="form-group"><label class="form-label">Description</label><input type="text" id="tool-desc" placeholder="What this tool does"></div>
+
+    <div id="tool-http-fields">
+      <div class="form-group"><label class="form-label">Endpoint</label><input type="text" id="tool-endpoint" placeholder="https://api.example.com/endpoint"></div>
+      <div class="form-group"><label class="form-label">Headers (JSON)</label><textarea id="tool-headers" rows="2" placeholder='{"Authorization":"Bearer ..."}'></textarea></div>
+      <div class="form-group"><label class="form-label">Input Mapping (JSON)</label><textarea id="tool-input-mapping" rows="2" placeholder='{"query":"$.args.search"}'></textarea></div>
+    </div>
+
+    <div id="tool-script-fields" style="display:none">
+      <div class="form-group"><label class="form-label">Script Path</label><input type="text" id="tool-script-path" placeholder="./scripts/my-tool.sh"></div>
+    </div>
+
+    <div class="form-group"><label class="form-label">Parameters (JSON Schema)</label><textarea id="tool-params" rows="5" placeholder='{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'></textarea></div>
   `, `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
      <button class="btn btn-primary" onclick="saveTool()">Save</button>`);
+}
+
+function toggleToolHandlerFields() {
+  const handler = document.getElementById('tool-handler').value;
+  document.getElementById('tool-http-fields').style.display = handler === 'http' ? '' : 'none';
+  document.getElementById('tool-script-fields').style.display = handler === 'script' ? '' : 'none';
 }
 
 async function saveTool() {
   try {
     let params = {};
     try { params = JSON.parse(document.getElementById('tool-params').value || '{}'); } catch {}
-    await API.post('/api/v1/tools', {
+    let headers = {};
+    try { headers = JSON.parse(document.getElementById('tool-headers').value || '{}'); } catch {}
+    let inputMapping = {};
+    try { inputMapping = JSON.parse(document.getElementById('tool-input-mapping').value || '{}'); } catch {}
+
+    const handler = document.getElementById('tool-handler').value;
+    const body = {
       name: document.getElementById('tool-name').value,
       description: document.getElementById('tool-desc').value,
-      handler: document.getElementById('tool-handler').value,
-      endpoint: document.getElementById('tool-endpoint').value,
+      handler,
       parameters: params,
-    });
+    };
+
+    if (handler === 'http') {
+      body.endpoint = document.getElementById('tool-endpoint').value;
+      if (Object.keys(headers).length) body.headers = headers;
+      if (Object.keys(inputMapping).length) body.inputMapping = inputMapping;
+    } else if (handler === 'script') {
+      body.scriptPath = document.getElementById('tool-script-path').value;
+    }
+
+    await API.post('/api/v1/tools', body);
     closeModal();
     toast('Tool saved', 'success');
     renderTools(document.getElementById('main-content'));

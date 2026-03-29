@@ -88,7 +88,7 @@ func main() {
 	// HTTP handler
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /chat", func(w http.ResponseWriter, r *http.Request) {
 		p := reg.Negotiate(r.Header.Get("Accept"))
 		if p == nil {
 			p = reg.Default()

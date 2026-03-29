@@ -383,6 +383,33 @@ input::placeholder,textarea::placeholder{color:var(--text-muted)}
 }
 .chat-topbar select{width:220px;padding:6px 10px;font-size:12px}
 
+/* Protocol toggle */
+.proto-toggle{
+  display:flex;
+  background:var(--bg-deep);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  overflow:hidden;
+  margin-left:auto;
+}
+.proto-toggle button{
+  padding:5px 12px;
+  font-size:11px;
+  font-weight:600;
+  font-family:'IBM Plex Mono',monospace;
+  letter-spacing:0.03em;
+  background:transparent;
+  color:var(--text-muted);
+  border:none;
+  cursor:pointer;
+  transition:all var(--transition);
+}
+.proto-toggle button.active{
+  background:var(--accent-glow);
+  color:var(--accent);
+}
+.proto-toggle button:hover:not(.active){color:var(--text-secondary)}
+
 .chat-messages{
   flex:1;overflow-y:auto;
   display:flex;flex-direction:column;
@@ -412,6 +439,21 @@ input::placeholder,textarea::placeholder{color:var(--text-muted)}
   color:var(--text-primary);
   border-bottom-left-radius:4px;
 }
+
+/* Markdown rendering inside assistant messages */
+.chat-msg.assistant p{margin:0 0 8px}
+.chat-msg.assistant p:last-child{margin-bottom:0}
+.chat-msg.assistant strong{color:#fff;font-weight:600}
+.chat-msg.assistant em{color:var(--text-secondary);font-style:italic}
+.chat-msg.assistant code{
+  background:var(--bg-deep);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:1px 5px;
+  font-family:'IBM Plex Mono',monospace;
+  font-size:12px;
+  color:var(--accent);
+}
 .chat-msg.assistant pre{
   background:var(--bg-deep);
   border:1px solid var(--border);
@@ -421,7 +463,65 @@ input::placeholder,textarea::placeholder{color:var(--text-muted)}
   overflow-x:auto;
   font-family:'IBM Plex Mono',monospace;
   font-size:12px;
+  line-height:1.5;
 }
+.chat-msg.assistant pre code{
+  background:transparent;
+  border:none;
+  padding:0;
+  color:var(--text-primary);
+}
+.chat-msg.assistant ul,.chat-msg.assistant ol{
+  margin:4px 0 8px 20px;
+}
+.chat-msg.assistant li{margin:2px 0}
+.chat-msg.assistant blockquote{
+  border-left:3px solid var(--accent);
+  margin:8px 0;
+  padding:4px 12px;
+  color:var(--text-secondary);
+}
+.chat-msg.assistant h1,.chat-msg.assistant h2,.chat-msg.assistant h3{
+  margin:12px 0 4px;font-weight:700;color:#fff;
+}
+.chat-msg.assistant h1{font-size:18px}
+.chat-msg.assistant h2{font-size:16px}
+.chat-msg.assistant h3{font-size:14px}
+.chat-msg.assistant hr{
+  border:none;
+  border-top:1px solid var(--border);
+  margin:12px 0;
+}
+.chat-msg.assistant a{
+  color:var(--accent);
+  text-decoration:underline;
+}
+
+/* Tool call blocks */
+.tool-call-block{
+  background:var(--bg-deep);
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:8px 12px;
+  margin:6px 0;
+  font-family:'IBM Plex Mono',monospace;
+  font-size:12px;
+  color:var(--text-secondary);
+}
+.tool-call-block .tool-name{
+  color:var(--warning);
+  font-weight:600;
+}
+.tool-call-block .tool-result{
+  color:var(--success);
+  margin-top:4px;
+}
+.tool-call-block .tool-args{
+  color:var(--text-muted);
+  margin-top:2px;
+  white-space:pre-wrap;
+}
+
 .chat-msg .typing-cursor{
   display:inline-block;
   width:2px;height:1em;
@@ -633,6 +733,7 @@ const state = {
   chatSessionId: '',
   chatSessions: [],
   streaming: false,
+  protocol: 'ai-sdk', // 'ai-sdk' or 'ag-ui'
 };
 
 // ── API helpers ──
@@ -816,7 +917,10 @@ async function renderChat(c) {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         New
       </button>
-      <span style="flex:1"></span>
+      <div class="proto-toggle">
+        <button class="${state.protocol === 'ai-sdk' ? 'active' : ''}" onclick="setProtocol('ai-sdk')">AI SDK</button>
+        <button class="${state.protocol === 'ag-ui' ? 'active' : ''}" onclick="setProtocol('ag-ui')">AG-UI</button>
+      </div>
       <span style="font-size:12px;color:var(--text-muted)" id="chat-status"></span>
     </div>
     <div class="chat-messages" id="chat-messages"></div>
@@ -826,6 +930,64 @@ async function renderChat(c) {
     </div>`;
 
   await loadChatSessions();
+}
+
+function setProtocol(proto) {
+  state.protocol = proto;
+  document.querySelectorAll('.proto-toggle button').forEach(b => {
+    b.classList.toggle('active', b.textContent.toLowerCase().replace('-', '-') === proto);
+  });
+}
+
+// ── Simple Markdown renderer ──
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = text;
+  // Escape HTML entities first (but preserve our own tags later)
+  html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // Code blocks: ```lang\n...\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`);
+
+  // Inline code: `...`
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Bold: **...** or __...__
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+
+  // Italic: *...* or _..._
+  html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+  // Headings (must be at start of line)
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // Horizontal rule
+  html = html.replace(/^---$/gm, '<hr>');
+
+  // Blockquote
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // Unordered list
+  html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+
+  // Links: [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+  // Paragraphs: double newlines
+  html = html.replace(/\n{2,}/g, '</p><p>');
+
+  // Single newlines to <br> (but not inside pre/code blocks)
+  html = html.replace(/(?<!<\/pre>|<\/code>|<\/li>|<\/ul>|<\/h[1-3]>|<\/blockquote>|<\/hr>|<\/p>)\n/g, '<br>');
+
+  // Wrap in paragraph if not already wrapped
+  if (!html.startsWith('<')) html = '<p>' + html + '</p>';
+
+  return html;
 }
 
 async function loadChatSessions() {
@@ -891,19 +1053,40 @@ async function sendChat() {
   cursor.className = 'typing-cursor';
   assistantEl.appendChild(cursor);
 
+  // Accumulators
+  let textAcc = '';
+  let toolCalls = {}; // toolCallId -> {name, args, result}
+  let renderTimer = null;
+
+  function scheduleRender() {
+    if (renderTimer) return;
+    renderTimer = requestAnimationFrame(() => {
+      renderTimer = null;
+      renderAssistantContent(assistantEl, textAcc, toolCalls, cursor);
+      scrollChat();
+    });
+  }
+
   try {
     const body = { message: msg };
     if (state.chatSessionId) body.sessionId = state.chatSessionId;
 
+    // Set Accept header based on protocol selection
+    const acceptHeader = state.protocol === 'ag-ui'
+      ? 'text/vnd.ag-ui'
+      : 'text/vnd.ai-sdk';
+
     const res = await fetch('/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': acceptHeader,
+      },
       body: JSON.stringify(body),
     });
 
     if (!res.ok) throw new Error(await res.text());
 
-    // Capture session ID from response if new
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -919,54 +1102,119 @@ async function sendChat() {
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const data = line.slice(6).trim();
-        if (!data || data === '[DONE]') continue;
+        if (!data) continue;
+
+        if (data === '[DONE]') {
+          // AI SDK done signal
+          continue;
+        }
 
         try {
           const event = JSON.parse(data);
 
-          // Handle AI SDK format
-          if (event.type === 'text-delta' && event.textDelta) {
-            cursor.insertAdjacentText('beforebegin', event.textDelta);
-            scrollChat();
-          } else if (event.type === 'text' && event.text) {
-            cursor.insertAdjacentText('beforebegin', event.text);
-            scrollChat();
-          } else if (event.type === 'tool-call') {
-            cursor.insertAdjacentText('beforebegin', `\n[Tool: ${event.toolName}]\n`);
-          } else if (event.type === 'tool-result') {
-            cursor.insertAdjacentText('beforebegin', `\n[Result received]\n`);
-          } else if (event.type === 'step-start') {
-            // handle step start
-          } else if (event.type === 'finish') {
-            // done
-          } else if (event.type === 'session' && event.sessionId) {
-            state.chatSessionId = event.sessionId;
-            loadChatSessions();
-          }
-
-          // AGUI message format
-          if (event.type === 'MESSAGE_START' && event.message) {
-            if (event.message.id && !state.chatSessionId) {
-              // session might be in metadata
-            }
-          } else if (event.type === 'CONTENT_BLOCK_DELTA' && event.delta) {
-            if (event.delta.type === 'text_delta' && event.delta.text) {
-              cursor.insertAdjacentText('beforebegin', event.delta.text);
-              scrollChat();
-            }
+          if (state.protocol === 'ai-sdk') {
+            parseAISDK(event, toolCalls, (delta) => {
+              textAcc += delta;
+              scheduleRender();
+            });
+          } else {
+            parseAGUI(event, toolCalls, (delta) => {
+              textAcc += delta;
+              scheduleRender();
+            });
           }
         } catch {}
       }
     }
   } catch (e) {
-    cursor.insertAdjacentText('beforebegin', 'Error: ' + e.message);
+    textAcc += '\n\n**Error:** ' + e.message;
     toast('Chat error: ' + e.message, 'error');
   }
 
   cursor.remove();
+  renderAssistantContent(assistantEl, textAcc, toolCalls, null);
+  scrollChat();
   state.streaming = false;
   document.getElementById('chat-status').textContent = '';
   document.getElementById('chat-send-btn').disabled = false;
+}
+
+// ── AI SDK SSE parser ──
+function parseAISDK(event, toolCalls, onText) {
+  switch (event.type) {
+    case 'text-delta':
+      if (event.delta) onText(event.delta);
+      break;
+    case 'tool-input-start':
+      toolCalls[event.toolCallId] = { name: event.toolName, args: '', result: '' };
+      break;
+    case 'tool-input-delta':
+      if (toolCalls[event.toolCallId]) toolCalls[event.toolCallId].args += event.delta || '';
+      break;
+    case 'tool-output-available':
+      if (toolCalls[event.toolCallId]) toolCalls[event.toolCallId].result = event.output || '';
+      break;
+    case 'reasoning':
+      if (event.delta) onText(event.delta);
+      break;
+    case 'error':
+      onText('\n\n**Error:** ' + (event.error || 'unknown error'));
+      break;
+  }
+}
+
+// ── AG-UI SSE parser ──
+function parseAGUI(event, toolCalls, onText) {
+  switch (event.type) {
+    case 'TEXT_MESSAGE_CONTENT':
+      if (event.delta) onText(event.delta);
+      break;
+    case 'TOOL_CALL_START':
+      toolCalls[event.toolCallId] = { name: event.toolCallName, args: '', result: '' };
+      break;
+    case 'TOOL_CALL_ARGS':
+      if (toolCalls[event.toolCallId]) toolCalls[event.toolCallId].args += event.delta || '';
+      break;
+    case 'TOOL_CALL_RESULT':
+      if (toolCalls[event.toolCallId]) toolCalls[event.toolCallId].result = event.content || '';
+      break;
+    case 'REASONING_MESSAGE_CONTENT':
+      if (event.delta) onText(event.delta);
+      break;
+    case 'RUN_ERROR':
+      onText('\n\n**Error:** ' + (event.message || 'unknown error'));
+      break;
+    case 'RUN_STARTED':
+      if (event.threadId) {
+        state.chatSessionId = event.threadId;
+        loadChatSessions();
+      }
+      break;
+  }
+}
+
+// ── Render assistant content with markdown + tool call blocks ──
+function renderAssistantContent(el, text, toolCalls, cursor) {
+  let html = renderMarkdown(text);
+
+  // Append tool call blocks
+  const tcEntries = Object.entries(toolCalls);
+  if (tcEntries.length) {
+    html += tcEntries.map(([, tc]) => {
+      let block = `<div class="tool-call-block"><span class="tool-name">${escHtml(tc.name)}</span>`;
+      if (tc.args) block += `<div class="tool-args">${escHtml(tc.args)}</div>`;
+      if (tc.result) block += `<div class="tool-result">${escHtml(tc.result)}</div>`;
+      block += '</div>';
+      return block;
+    }).join('');
+  }
+
+  el.innerHTML = html;
+  if (cursor) el.appendChild(cursor);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function appendChatMsg(role, text) {
@@ -974,7 +1222,11 @@ function appendChatMsg(role, text) {
   if (!container) return null;
   const div = document.createElement('div');
   div.className = 'chat-msg ' + role;
-  div.textContent = text;
+  if (role === 'user') {
+    div.textContent = text;
+  } else {
+    div.innerHTML = renderMarkdown(text);
+  }
   container.appendChild(div);
   scrollChat();
   return div;

@@ -14,6 +14,7 @@ import (
 	"github.com/ratrektlabs/rakit/agent"
 	"github.com/ratrektlabs/rakit/protocol"
 	"github.com/ratrektlabs/rakit/protocol/aisdk"
+	"github.com/ratrektlabs/rakit/protocol/agui"
 	"github.com/ratrektlabs/rakit/provider/gemini"
 	"github.com/ratrektlabs/rakit/skill"
 	blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
@@ -83,6 +84,7 @@ func main() {
 	// Protocol registry
 	reg := protocol.NewRegistry()
 	reg.Register(aisdk.New())
+	reg.Register(agui.New())
 	reg.SetDefault(aisdk.New())
 
 	// HTTP handler

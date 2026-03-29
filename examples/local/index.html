@@ -1077,6 +1077,7 @@ async function sendChat() {
   let toolCalls = {}; // toolCallId -> {name, args, result}
   let renderTimer = null;
   let firstToken = true;
+  let streamStarted = false;
   const cursor = document.createElement('span');
   cursor.className = 'typing-cursor';
 
@@ -1084,6 +1085,7 @@ async function sendChat() {
     if (renderTimer) return;
     renderTimer = requestAnimationFrame(() => {
       renderTimer = null;
+      if (!streamStarted) return; // Don't touch innerHTML while dots are showing
       renderAssistantContent(assistantEl, textAcc, toolCalls, cursor);
       scrollChat();
     });
@@ -1134,13 +1136,17 @@ async function sendChat() {
           // On first meaningful token, remove thinking dots and start streaming
           if (firstToken) {
             const hasText = (state.protocol === 'ai-sdk' && (event.type === 'text-delta' || event.type === 'text'))
-              || (state.protocol === 'ag-ui' && event.type === 'TEXT_MESSAGE_CONTENT');
+              || (state.protocol === 'ag-ui' && (event.type === 'TEXT_MESSAGE_CONTENT' || event.type === 'TEXT_MESSAGE_START'));
             const hasTool = (state.protocol === 'ai-sdk' && event.type === 'tool-input-start')
               || (state.protocol === 'ag-ui' && event.type === 'TOOL_CALL_START');
+            const hasRun = (state.protocol === 'ag-ui' && event.type === 'RUN_STARTED');
             if (hasText || hasTool) {
               firstToken = false;
+              streamStarted = true;
               dots.remove();
               document.getElementById('chat-status').textContent = 'Streaming...';
+            } else if (hasRun) {
+              // AGUI run started but no content yet, keep dots
             }
           }
 
@@ -1165,7 +1171,8 @@ async function sendChat() {
 
   // Final cleanup
   if (dots.parentNode) dots.remove();
-  if (cursor.parentNode) cursor.remove();
+  cursor.remove();
+  streamStarted = true; // ensure render can proceed
   renderAssistantContent(assistantEl, textAcc, toolCalls, null);
   scrollChat();
   state.streaming = false;

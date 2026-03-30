@@ -15,25 +15,64 @@ import (
 	"github.com/ratrektlabs/rakit/protocol"
 	"github.com/ratrektlabs/rakit/protocol/aisdk"
 	"github.com/ratrektlabs/rakit/protocol/agui"
+	"github.com/ratrektlabs/rakit/provider"
 	"github.com/ratrektlabs/rakit/provider/gemini"
+	"github.com/ratrektlabs/rakit/provider/openai"
 	"github.com/ratrektlabs/rakit/skill"
 	blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 	metaSQLite "github.com/ratrektlabs/rakit/storage/metadata/sqlite"
 )
 
 //go:embed index.html
 var frontendFS embed.FS
 
+// providerConfig is the persisted provider configuration stored in the metadata store.
+type providerConfig struct {
+	Provider string `json:"provider"`
+	APIKey   string `json:"apiKey"`
+	Model    string `json:"model"`
+}
+
+// loadProviderConfig tries to create a provider from env vars, falling back to
+// config persisted in the metadata store. Returns nil if no config is available.
+func loadProviderConfig(ctx context.Context, store metadata.Store) (provider.Provider, error) {
+	// Try environment variables first
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	if geminiKey != "" {
+		return gemini.New("gemini-3.1-pro-preview", geminiKey)
+	}
+	openaiKey := os.Getenv("OPENAI_API_KEY")
+	if openaiKey != "" {
+		return openai.New("gpt-5.4", openaiKey), nil
+	}
+
+	// Fall back to persisted config
+	data, err := store.Get(ctx, "__config:provider")
+	if err != nil || data == nil {
+		return nil, nil // No saved config — that's okay
+	}
+
+	var cfg providerConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid saved provider config: %w", err)
+	}
+	if cfg.APIKey == "" {
+		return nil, nil
+	}
+
+	switch cfg.Provider {
+	case "gemini":
+		return gemini.New(cfg.Model, cfg.APIKey)
+	case "openai":
+		return openai.New(cfg.Model, cfg.APIKey), nil
+	default:
+		return nil, fmt.Errorf("unknown saved provider: %s", cfg.Provider)
+	}
+}
+
 func main() {
 	ctx := context.Background()
-
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
-	if apiKey == "" {
-		log.Fatal("GEMINI_API_KEY or OPENAI_API_KEY is required")
-	}
 
 	// Storage (local — no external services required)
 	store, err := metaSQLite.NewStore(ctx, "./data/agent.db")
@@ -47,10 +86,12 @@ func main() {
 		log.Fatalf("Failed to create local blob store: %v", err)
 	}
 
-	// Provider
-	prov, err := gemini.New("gemini-3.1-pro-preview", apiKey)
-	if err != nil {
-		log.Fatalf("Failed to create Gemini provider: %v", err)
+	// Provider — try env vars first, then fall back to saved config in store
+	var prov provider.Provider
+	if p, err := loadProviderConfig(ctx, store); err != nil {
+		log.Printf("Warning: could not load saved provider config: %v", err)
+	} else if p != nil {
+		prov = p
 	}
 
 	// Agent
@@ -91,6 +132,11 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /chat", func(w http.ResponseWriter, r *http.Request) {
+		if a.Provider == nil {
+			http.Error(w, "no provider configured — set one via Provider settings", http.StatusServiceUnavailable)
+			return
+		}
+
 		p := reg.Negotiate(r.Header.Get("Accept"))
 		if p == nil {
 			p = reg.Default()
@@ -141,6 +187,9 @@ func main() {
 	fmt.Printf("Agent server listening on %s\n", addr)
 	fmt.Println("Data stored in ./data/")
 	fmt.Println("Admin API at /api/v1/")
+	if prov == nil {
+		fmt.Println("No provider configured — set one via the dashboard Provider settings")
+	}
 	fmt.Printf("Dashboard at http://localhost%s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, corsMiddleware(requestLogger(mux))))
 }

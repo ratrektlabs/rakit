@@ -13,6 +13,8 @@ import (
 	"github.com/ratrektlabs/rakit/storage/metadata"
 )
 
+const providerConfigKey = "__config:provider"
+
 // registerAdminHandlers registers admin API routes on the given mux.
 // All routes are prefixed with /api/v1/.
 func registerAdminHandlers(mux *http.ServeMux, a *agent.Agent) {
@@ -415,15 +417,39 @@ func (h *adminHandler) listMemory(w http.ResponseWriter, r *http.Request) {
 // --- Provider ---
 
 func (h *adminHandler) getProvider(w http.ResponseWriter, r *http.Request) {
-	if h.agent.Provider == nil {
-		writeError(w, http.StatusBadRequest, "no provider configured")
-		return
+	resp := map[string]any{
+		"configured": h.agent.Provider != nil,
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"provider": h.agent.Provider.Name(),
-		"model":    h.agent.Provider.Model(),
-		"models":   h.agent.Provider.Models(),
-	})
+
+	if h.agent.Provider != nil {
+		resp["provider"] = h.agent.Provider.Name()
+		resp["model"] = h.agent.Provider.Model()
+		resp["models"] = h.agent.Provider.Models()
+	}
+
+	// Return persisted config info (with masked API key)
+	if store := h.agent.Store; store != nil {
+		if data, err := store.Get(r.Context(), providerConfigKey); err == nil && data != nil {
+			var cfg map[string]string
+			if json.Unmarshal(data, &cfg) == nil {
+				saved := map[string]any{
+					"provider": cfg["provider"],
+					"model":    cfg["model"],
+					"hasKey":   cfg["apiKey"] != "",
+				}
+				if key := cfg["apiKey"]; key != "" {
+					if len(key) > 8 {
+						saved["apiKeyMasked"] = key[:4] + "..." + key[len(key)-4:]
+					} else {
+						saved["apiKeyMasked"] = "****"
+					}
+				}
+				resp["saved"] = saved
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *adminHandler) setModel(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +486,10 @@ func (h *adminHandler) setProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing provider or apiKey")
 		return
 	}
+	if body.Model == "" {
+		writeError(w, http.StatusBadRequest, "missing model")
+		return
+	}
 
 	var p provider.Provider
 	var err error
@@ -475,6 +505,19 @@ func (h *adminHandler) setProvider(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create provider: %v", err))
 		return
+	}
+
+	// Persist config to store so it survives restarts
+	if store := h.agent.Store; store != nil {
+		cfgData, _ := json.Marshal(map[string]string{
+			"provider": body.Provider,
+			"apiKey":   body.APIKey,
+			"model":    body.Model,
+		})
+		if err := store.Set(r.Context(), providerConfigKey, cfgData); err != nil {
+			// Log but don't fail — the provider is still active in-memory
+			fmt.Printf("Warning: failed to persist provider config: %v\n", err)
+		}
 	}
 
 	h.agent.Provider = p

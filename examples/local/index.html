@@ -1688,34 +1688,51 @@ async function renderProvider(c) {
     const data = await API.get('/api/v1/provider');
     state.provider = data;
 
+    const configured = data.configured;
     const models = data.models || [];
-    const currentProvider = data.provider || 'gemini';
+    const currentProvider = data.provider || (data.saved && data.saved.provider) || 'gemini';
     const provDef = PROVIDERS[currentProvider] || { name: currentProvider, models, envKey: '' };
+
+    // Build saved API key display
+    const savedInfo = data.saved || {};
+    const savedKeyHtml = savedInfo.hasKey
+      ? `<span style="color:var(--success)">${savedInfo.apiKeyMasked || '****'}</span>`
+      : `<span style="color:var(--text-muted)">Not set</span>`;
 
     c.innerHTML = `
       <!-- Current status -->
       <div class="provider-grid">
         <div class="provider-card">
           <h3>Active Provider</h3>
-          <div class="provider-value">${provDef.name || currentProvider}</div>
-          <div class="provider-label">${currentProvider}</div>
+          <div class="provider-value">${configured ? (provDef.name || currentProvider) : 'None'}</div>
+          <div class="provider-label">${configured ? currentProvider : 'Configure a provider below'}</div>
         </div>
         <div class="provider-card">
           <h3>Active Model</h3>
           <div class="provider-value" style="color:var(--accent);font-family:'IBM Plex Mono',monospace;font-size:16px">${data.model || '—'}</div>
-          <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          ${configured ? `<div style="margin-top:12px;display:flex;gap:8px;align-items:center">
             <select id="provider-model-select" style="flex:1">
               ${models.map(m => `<option value="${m}" ${m === data.model ? 'selected' : ''}>${m}</option>`).join('')}
               <option value="__custom">Custom model...</option>
             </select>
             <button class="btn btn-primary btn-sm" onclick="setModel()">Apply</button>
+          </div>` : ''}
+        </div>
+      </div>
+
+      <!-- Saved API Key -->
+      <div class="card" style="margin-top:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">Saved Provider Config</div>
+            <div style="font-size:13px">Provider: <strong>${savedInfo.provider || '—'}</strong> &nbsp;|&nbsp; Model: <strong>${savedInfo.model || '—'}</strong> &nbsp;|&nbsp; Key: ${savedKeyHtml}</div>
           </div>
         </div>
       </div>
 
-      <!-- Switch provider -->
+      <!-- Configure provider -->
       <div class="card" style="margin-top:20px">
-        <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:16px">Switch Provider</h3>
+        <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:16px">Configure Provider</h3>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
           <div class="form-group" style="margin:0">
             <label class="form-label">Provider</label>
@@ -1731,24 +1748,24 @@ async function renderProvider(c) {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">
           <div class="form-group" style="margin:0">
             <label class="form-label">Model</label>
-            <input type="text" id="prov-switch-model" value="${data.model || ''}" placeholder="Model name...">
+            <input type="text" id="prov-switch-model" value="${data.model || (savedInfo.model) || ''}" placeholder="Model name...">
           </div>
           <div style="display:flex;align-items:flex-end">
-            <button class="btn btn-primary" onclick="switchProvider()" style="width:100%">Switch Provider</button>
+            <button class="btn btn-primary" onclick="switchProvider()" style="width:100%">Save & Activate</button>
           </div>
         </div>
         <div style="margin-top:8px;font-size:12px;color:var(--text-muted)">
-          This replaces the active provider and model. The API key is not stored permanently.
+          The API key and provider settings are persisted to local storage and will be available after restart.
         </div>
       </div>
 
       <!-- Available models -->
-      <div class="card" style="margin-top:20px">
+      ${configured ? `<div class="card" style="margin-top:20px">
         <h3 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:16px">Available Models</h3>
         <ul class="model-list">
           ${models.map(m => `<li class="${m === data.model ? 'active' : ''}" style="cursor:pointer" onclick="quickSetModel('${m}')">${m}${m === data.model ? ' <span style="font-size:11px;color:var(--text-muted)"> (active)</span>' : ''}</li>`).join('')}
         </ul>
-      </div>`;
+      </div>` : ''}`;
   } catch (e) {
     c.innerHTML = `<div class="empty-state"><p>Failed to load provider: ${e.message}</p></div>`;
   }

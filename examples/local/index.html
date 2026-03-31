@@ -196,8 +196,6 @@ td.mono{font-family:'IBM Plex Mono',monospace;font-size:12px}
 .tool-call-block .tool-result{color:var(--green);margin-top:4px}
 .tool-call-block .tool-args{color:var(--text-2);margin-top:2px;white-space:pre-wrap}
 
-.chat-msg .typing-cursor{display:inline-block;width:2px;height:1em;background:var(--accent);margin-left:2px;animation:blink 800ms infinite;vertical-align:text-bottom}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
 .thinking-dots{display:inline-flex;gap:4px;align-items:center;padding:4px 0}
 .thinking-dots span{width:5px;height:5px;border-radius:50%;background:var(--text-2);animation:dotPulse 1.4s ease-in-out infinite}
 .thinking-dots span:nth-child(2){animation-delay:0.2s}
@@ -305,6 +303,21 @@ td.mono{font-family:'IBM Plex Mono',monospace;font-size:12px}
 .prov-quick-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-2);margin-bottom:12px}
 .prov-quick-pills{display:flex;flex-wrap:wrap;gap:6px}
 @media(max-width:780px){.prov-grid{grid-template-columns:1fr}}
+
+/* ── Provider model list ── */
+.prov-model-list{display:flex;flex-direction:column;gap:4px;margin-bottom:8px;max-height:220px;overflow-y:auto}
+.prov-model-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:var(--radius);background:var(--bg-0);border:1px solid var(--border);font-size:12.5px;transition:border-color var(--t),opacity var(--t)}
+.prov-model-item:hover{border-color:var(--border-light)}
+.prov-model-item.disabled{opacity:0.4}
+.prov-model-item .m-toggle{width:16px;height:16px;border-radius:4px;border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all var(--t);font-size:10px;color:transparent;cursor:pointer;background:transparent;padding:0}
+.prov-model-item .m-toggle.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.prov-model-item .m-toggle:hover:not(.on){border-color:var(--text-2)}
+.prov-model-item .m-name{font-family:'IBM Plex Mono',monospace;flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prov-model-item .m-remove{width:18px;height:18px;border:none;background:transparent;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:4px;transition:all var(--t);padding:0;flex-shrink:0}
+.prov-model-item .m-remove:hover{background:var(--red-dim);color:var(--red)}
+.prov-model-item .m-remove svg{width:12px;height:12px}
+.prov-add-model{display:flex;gap:6px;margin-top:8px}
+.prov-add-model input{flex:1;font-family:'IBM Plex Mono',monospace;font-size:12px}
 
 /* ── Stat grid (for dashboard) ── */
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}
@@ -477,9 +490,11 @@ async function renderChat(c){
   var curProv=state.provider?.provider||'';
   var curModel=state.provider?.model||'';
   var allModelItems=[];
+  var enabledMap=getProvEnabled();
   Object.keys(PROVIDER_DEFS).forEach(function(pk){
     if(!provKeys[pk])return;
-    PROVIDER_DEFS[pk].models.forEach(function(m){
+    var enabledList=enabledMap[pk]||PROVIDER_DEFS[pk].models;
+    enabledList.forEach(function(m){
       allModelItems.push({provider:pk,model:m});
     });
   });
@@ -743,8 +758,7 @@ async function sendChat(){
   assistantEl.appendChild(dots);
 
   let textAcc='',toolCalls={},renderTimer=null,firstToken=true,streamStarted=false;
-  const cursor=document.createElement('span');cursor.className='typing-cursor';
-  function scheduleRender(){if(renderTimer)return;renderTimer=requestAnimationFrame(()=>{renderTimer=null;if(!streamStarted)return;renderAssistantContent(assistantEl,textAcc,toolCalls,cursor);scrollChat()})}
+  function scheduleRender(){if(renderTimer)return;renderTimer=requestAnimationFrame(()=>{renderTimer=null;if(!streamStarted)return;renderAssistantContent(assistantEl,textAcc,toolCalls);scrollChat()})}
 
   try{
     const body={message:msg};if(state.chatSessionId)body.sessionId=state.chatSessionId;
@@ -775,8 +789,8 @@ async function sendChat(){
   }catch(e){textAcc+='\n\n**Error:** '+e.message;toast('Chat error: '+e.message,'error')}
 
   if(dots.parentNode)dots.remove();
-  cursor.remove();streamStarted=true;
-  renderAssistantContent(assistantEl,textAcc,toolCalls,null);scrollChat();
+  streamStarted=true;
+  renderAssistantContent(assistantEl,textAcc,toolCalls);scrollChat();
   state.streaming=false;
   document.getElementById('chat-status').textContent='';
   document.getElementById('chat-send-btn').disabled=false;
@@ -805,7 +819,7 @@ function parseAGUI(event,tc,onText){
   }
 }
 
-function renderAssistantContent(el,text,toolCalls,cursor){
+function renderAssistantContent(el,text,toolCalls){
   let html=renderMarkdown(text);
   const tcEntries=Object.entries(toolCalls);
   if(tcEntries.length){
@@ -816,7 +830,7 @@ function renderAssistantContent(el,text,toolCalls,cursor){
       return b+'</div>';
     }).join('');
   }
-  el.innerHTML=html;if(cursor)el.appendChild(cursor);
+  el.innerHTML=html;
 }
 
 function appendChatMsg(role,text){
@@ -998,19 +1012,34 @@ var PROVIDER_DEFS={
 };
 
 var PROV_KEY_STORE='rl_prov_keys';
+var PROV_ENABLED_STORE='rl_prov_enabled';
+var PROV_CUSTOM_STORE='rl_prov_custom';
 function getProvKeys(){try{return JSON.parse(localStorage.getItem(PROV_KEY_STORE)||'{}')}catch(e){return{}}}
 function saveProvKey(provider,key){
   var ks=getProvKeys();
   if(key) ks[provider]=key; else delete ks[provider];
   localStorage.setItem(PROV_KEY_STORE,JSON.stringify(ks));
 }
+function getProvEnabled(){try{return JSON.parse(localStorage.getItem(PROV_ENABLED_STORE)||'{}')}catch(e){return{}}}
+function saveProvEnabled(d){localStorage.setItem(PROV_ENABLED_STORE,JSON.stringify(d))}
+function getProvCustom(){try{return JSON.parse(localStorage.getItem(PROV_CUSTOM_STORE)||'{}')}catch(e){return{}}}
+function saveProvCustom(d){localStorage.setItem(PROV_CUSTOM_STORE,JSON.stringify(d))}
+function getEnabledModelsForProvider(pk){
+  var em=getProvEnabled(),cm=getProvCustom(),def=PROVIDER_DEFS[pk];
+  var list=em[pk];
+  if(!list){list=def.models.slice();em[pk]=list;saveProvEnabled(em)}
+  var result=[];
+  def.models.forEach(function(m){if(list.indexOf(m)>=0)result.push({name:m,custom:false})});
+  (cm[pk]||[]).forEach(function(m){if(list.indexOf(m)>=0)result.push({name:m,custom:true})});
+  return result;
+}
 
 function buildUnifiedModelList(){
-  var keys=getProvKeys();
-  var list=[];
+  var keys=getProvKeys(),em=getProvEnabled(),list=[];
   Object.keys(PROVIDER_DEFS).forEach(function(pk){
     if(!keys[pk])return;
-    PROVIDER_DEFS[pk].models.forEach(function(m){
+    var enabledList=em[pk]||PROVIDER_DEFS[pk].models;
+    enabledList.forEach(function(m){
       list.push({provider:pk,model:m,label:PROVIDER_DEFS[pk].name+' / '+m});
     });
   });
@@ -1044,34 +1073,38 @@ function renderProvider(c){
   API.get('/api/v1/provider').then(function(data){
     state.provider=data;
     var cfg=data.configured,curProv=data.provider||'',curModel=data.model||'';
-    var sv=data.saved||{},keys=getProvKeys(),h='';
+    var keys=getProvKeys(),h='';
 
-    var bannerBg=cfg?'var(--green-dim)':'var(--amber-dim)';
-    var bannerBdr=cfg?'rgba(34,197,94,0.15)':'rgba(245,158,11,0.15)';
-    var dotC=cfg?'var(--green)':'var(--amber)';
-    h+='<div class="prov-banner" style="background:'+bannerBg+';border-color:'+bannerBdr+'">';
-    h+='<div class="dot" style="background:'+dotC+'"></div>';
-    h+='<span class="label">'+(cfg?'Active: '+escHtml(curProv)+' / '+escHtml(curModel):'No provider active')+'</span>';
+    // Count configured providers and enabled models
+    var provCount=0,modelCount=0;
+    Object.keys(PROVIDER_DEFS).forEach(function(pk){
+      if(keys[pk]){provCount++;modelCount+=getEnabledModelsForProvider(pk).length}
+    });
+
+    h+='<div class="prov-banner" style="background:var(--accent-muted);border-color:rgba(14,165,233,0.15)">';
+    h+='<div class="dot" style="background:var(--accent)"></div>';
+    h+='<span class="label">'+provCount+' provider'+(provCount!==1?'s':'')+' configured &middot; '+modelCount+' model'+(modelCount!==1?'s':'')+' enabled</span>';
+    if(cfg) h+='<span class="sub">Chat: '+escHtml(curProv)+' / '+escHtml(curModel)+'</span>';
     h+='</div>';
 
     h+='<div class="prov-grid">';
     Object.keys(PROVIDER_DEFS).forEach(function(pk){
       var def=PROVIDER_DEFS[pk];
-      var isActive=pk===curProv&&cfg;
       var hasKey=!!keys[pk];
-      var dotColor=isActive?'var(--green)':hasKey?'var(--amber)':'var(--text-2)';
-      var statusText=isActive?'Active':hasKey?'Ready':'Not set';
-      var statusBg=isActive?'var(--green-dim)':hasKey?'var(--amber-dim)':'var(--bg-hover)';
-      var statusColor=isActive?'var(--green)':hasKey?'var(--amber)':'var(--text-2)';
+      var dotColor=hasKey?'var(--green)':'var(--text-2)';
+      var statusText=hasKey?'Key saved':'No key';
+      var statusBg=hasKey?'var(--green-dim)':'var(--bg-hover)';
+      var statusColor=hasKey?'var(--green)':'var(--text-2)';
       var masked=hasKey?(keys[pk].substring(0,4)+'...'+keys[pk].slice(-4)):'';
 
-      h+='<div class="prov-card'+(isActive?' active-prov':'')+'">';
+      h+='<div class="prov-card">';
       h+='<div class="prov-card-hdr">';
       h+='<div class="dot" style="background:'+dotColor+'"></div>';
       h+='<span class="name">'+escHtml(def.name)+'</span>';
       h+='<span class="status" style="background:'+statusBg+';color:'+statusColor+'">'+statusText+'</span>';
       h+='</div><div class="prov-card-body">';
 
+      // API Key
       h+='<div class="form-group"><label class="form-label">API Key';
       if(hasKey) h+=' <span style="color:var(--green);text-transform:none;font-weight:500">('+escHtml(masked)+')</span>';
       h+='</label><div style="position:relative">';
@@ -1080,31 +1113,53 @@ function renderProvider(c){
       h+='<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
       h+='</button></div></div>';
 
-      var prefModel=isActive?curModel:def.models[0];
-      h+='<div class="form-group"><label class="form-label">Default Model</label>';
-      h+='<div class="prov-model-pills">';
+      // Models with enable/disable toggles
+      var enabledMap=getProvEnabled(),customMap=getProvCustom();
+      var enabledList=enabledMap[pk];
+      if(!enabledList){enabledList=def.models.slice();enabledMap[pk]=enabledList;saveProvEnabled(enabledMap)}
+      var customList=customMap[pk]||[];
+
+      h+='<div class="form-group"><label class="form-label">Models</label>';
+      h+='<div class="prov-model-list">';
       def.models.forEach(function(m){
-        h+='<button type="button" class="prov-model-pill'+(m===prefModel?' active':'')+'" onclick="document.getElementById(\'prov-model-'+pk+'\').value=\''+m+'\'">'+m+'</button>';
+        var isOn=enabledList.indexOf(m)>=0;
+        h+='<div class="prov-model-item'+(isOn?'':' disabled')+'">';
+        h+='<button class="m-toggle'+(isOn?' on':'')+'" onclick="toggleModelEnabled(\''+pk+'\',\''+escHtml(m)+'\')">&#10003;</button>';
+        h+='<span class="m-name">'+escHtml(m)+'</span>';
+        h+='</div>';
+      });
+      customList.forEach(function(m){
+        var isOn=enabledList.indexOf(m)>=0;
+        h+='<div class="prov-model-item'+(isOn?'':' disabled')+'">';
+        h+='<button class="m-toggle'+(isOn?' on':'')+'" onclick="toggleModelEnabled(\''+pk+'\',\''+escHtml(m)+'\')">&#10003;</button>';
+        h+='<span class="m-name">'+escHtml(m)+'</span>';
+        h+='<button class="m-remove" onclick="removeCustomModel(\''+pk+'\',\''+escHtml(m)+'\')" title="Remove">';
+        h+='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+        h+='</button></div>';
       });
       h+='</div>';
-      h+='<input type="text" id="prov-model-'+pk+'" value="'+escHtml(prefModel)+'" placeholder="Type or pick..." style="font-family:IBM Plex Mono,monospace;font-size:12px">';
-      h+='</div>';
+      h+='<div class="prov-add-model">';
+      h+='<input type="text" id="prov-custom-'+pk+'" placeholder="Add custom model..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();addCustomModel(\''+pk+'\')}">';
+      h+='<button class="btn btn-ghost btn-sm" onclick="addCustomModel(\''+pk+'\')">Add</button>';
+      h+='</div></div>';
 
+      // Save button (just saves the API key, no activation)
       h+='<div class="prov-activate-row">';
-      h+='<button class="btn '+(isActive?'btn-ghost':'btn-primary')+'" onclick="saveAndActivate(\''+pk+'\')">'+(isActive?'Restart':'Save & Activate')+'</button>';
+      h+='<button class="btn btn-primary" onclick="saveProvConfig(\''+pk+'\')">Save</button>';
       h+='</div></div></div>';
     });
     h+='</div>';
 
+    // Enabled models quick-switch
     var allModels=buildUnifiedModelList();
     if(allModels.length){
       h+='<div class="card prov-quick" style="margin-top:20px">';
-      h+='<div class="prov-quick-label">All Models</div>';
-      h+='<div style="font-size:11.5px;color:var(--text-2);margin-bottom:12px">Pick any model — provider switches automatically</div>';
+      h+='<div class="prov-quick-label">Enabled Models</div>';
+      h+='<div style="font-size:11.5px;color:var(--text-2);margin-bottom:12px">Select a model to use in chat</div>';
       h+='<div class="prov-quick-pills">';
       allModels.forEach(function(item){
-        var isActive=item.provider===curProv&&item.model===curModel;
-        h+='<button class="btn '+(isActive?'btn-primary':'btn-ghost')+' btn-sm" onclick="quickSwitch(\''+item.provider+'\',\''+escHtml(item.model)+'\')">'+escHtml(item.label)+'</button>';
+        var isAct=item.provider===curProv&&item.model===curModel;
+        h+='<button class="btn '+(isAct?'btn-primary':'btn-ghost')+' btn-sm" onclick="quickSwitch(\''+item.provider+'\',\''+escHtml(item.model)+'\')">'+escHtml(item.label)+'</button>';
       });
       h+='</div></div>';
     }
@@ -1115,13 +1170,56 @@ function renderProvider(c){
   });
 }
 
-function saveAndActivate(pk){
+function toggleModelEnabled(pk,model){
+  var em=getProvEnabled(),list=em[pk]||PROVIDER_DEFS[pk].models;
+  var idx=list.indexOf(model);
+  if(idx>=0)list.splice(idx,1);else list.push(model);
+  em[pk]=list;saveProvEnabled(em);
+  renderProvider(document.getElementById('main-content'));
+}
+
+function addCustomModel(pk){
+  var input=document.getElementById('prov-custom-'+pk);
+  var name=input.value.trim();
+  if(!name)return;
+  var def=PROVIDER_DEFS[pk];
+  if(def.models.indexOf(name)>=0){toast('Model already exists','error');return}
+  var cm=getProvCustom();
+  if(!cm[pk])cm[pk]=[];
+  if(cm[pk].indexOf(name)>=0){toast('Model already added','error');return}
+  cm[pk].push(name);saveProvCustom(cm);
+  var em=getProvEnabled();
+  if(!em[pk])em[pk]=def.models.slice();
+  if(em[pk].indexOf(name)<0)em[pk].push(name);
+  saveProvEnabled(em);
+  input.value='';
+  renderProvider(document.getElementById('main-content'));
+  toast('Model added','success');
+}
+
+function removeCustomModel(pk,model){
+  var cm=getProvCustom();
+  if(cm[pk]){cm[pk]=cm[pk].filter(function(m){return m!==model});saveProvCustom(cm)}
+  var em=getProvEnabled();
+  if(em[pk]){em[pk]=em[pk].filter(function(m){return m!==model});saveProvEnabled(em)}
+  renderProvider(document.getElementById('main-content'));
+}
+
+function saveProvConfig(pk){
   var newKey=document.getElementById('prov-key-'+pk).value.trim();
-  var model=document.getElementById('prov-model-'+pk).value.trim();
-  if(!model){toast('Pick a model','error');return}
-  activateProviderModel(pk,model,newKey).then(function(){
-    renderProvider(document.getElementById('main-content'));
-  }).catch(function(e){toast('Failed: '+e.message,'error')});
+  if(newKey) saveProvKey(pk,newKey);
+  // Auto-activate if no provider is currently active for chat
+  if(!state.provider||!state.provider.configured){
+    var em=getProvEnabled(),enabledList=em[pk]||PROVIDER_DEFS[pk].models;
+    if(keys[pk]&&enabledList.length){
+      activateProviderModel(pk,enabledList[0]).then(function(){
+        renderProvider(document.getElementById('main-content'));
+      }).catch(function(e){toast('Failed: '+e.message,'error')});
+      return;
+    }
+  }
+  renderProvider(document.getElementById('main-content'));
+  toast('API key saved','success');
 }
 
 function quickSwitch(prov,model){

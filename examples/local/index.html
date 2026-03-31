@@ -472,8 +472,37 @@ async function renderChat(c){
   // Activate all tools by default
   state.tools.forEach(t=>state.activeTools.add(t.name));
 
-  const models=state.provider?.models||[];
-  const curModel=state.provider?.model||'';
+  // Build unified model dropdown from ALL providers with saved keys
+  var provKeys=getProvKeys();
+  var curProv=state.provider?.provider||'';
+  var curModel=state.provider?.model||'';
+  var allModelItems=[];
+  Object.keys(PROVIDER_DEFS).forEach(function(pk){
+    if(!provKeys[pk])return;
+    PROVIDER_DEFS[pk].models.forEach(function(m){
+      allModelItems.push({provider:pk,model:m});
+    });
+  });
+
+  var dropdownHtml='';
+  if(allModelItems.length){
+    var lastProv='';
+    allModelItems.forEach(function(item){
+      if(item.provider!==lastProv){
+        if(lastProv) dropdownHtml+='<div style="height:1px;background:var(--border);margin:4px 0"></div>';
+        dropdownHtml+='<div style="padding:6px 14px 4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-2)">'+escHtml(PROVIDER_DEFS[item.provider].name)+'</div>';
+        lastProv=item.provider;
+      }
+      var isAct=item.provider===curProv&&item.model===curModel;
+      dropdownHtml+='<div class="model-dropdown-item'+(isAct?' active':'')+'" onclick="selectModel(\''+item.provider+'\',\''+escHtml(item.model)+'\',event)">';
+      dropdownHtml+='<span class="check">&#10003;</span>';
+      dropdownHtml+='<span class="m-name">'+escHtml(item.model)+'</span>';
+      dropdownHtml+='<span class="m-provider">'+escHtml(PROVIDER_DEFS[item.provider].name)+'</span>';
+      dropdownHtml+='</div>';
+    });
+  }else{
+    dropdownHtml='<div style="padding:14px;text-align:center;color:var(--text-2);font-size:12px">Configure providers in Settings</div>';
+  }
 
   c.innerHTML=`
     <div class="chat-header">
@@ -482,11 +511,7 @@ async function renderChat(c){
         <span class="model-name" id="model-label">${curModel||'No model'}</span>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
         <div class="model-dropdown" id="model-dropdown">
-          ${models.length?models.map(m=>`
-            <div class="model-dropdown-item${m===curModel?' active':''}" onclick="selectModel('${escHtml(m)}',event)">
-              <span class="check">&#10003;</span>
-              <span class="m-name">${escHtml(m)}</span>
-            </div>`).join(''):'<div style="padding:14px;text-align:center;color:var(--text-2);font-size:12px">No models available</div>'}
+          ${dropdownHtml}
         </div>
       </div>
       <div class="proto-toggle">
@@ -524,22 +549,22 @@ async function renderChat(c){
   await loadChatSessions();
 }
 
-// ── Model dropdown ──
+
+// ── Model dropdown (unified — all providers) ──
 function toggleModelDropdown(e){
   e.stopPropagation();
   document.getElementById('model-dropdown').classList.toggle('open');
 }
-function selectModel(m,e){
+async function selectModel(prov,m,e){
   e.stopPropagation();
   document.getElementById('model-dropdown').classList.remove('open');
-  API.put('/api/v1/provider/model',{model:m}).then(()=>{
-    state.provider.model=m;
+  switchModel(prov,m).then(function(){
     document.getElementById('model-label').textContent=m;
-    document.querySelectorAll('.model-dropdown-item').forEach(i=>{
-      i.classList.toggle('active',i.querySelector('.m-name').textContent===m);
+    document.querySelectorAll('.model-dropdown-item').forEach(function(i){
+      var n=i.querySelector('.m-name');
+      i.classList.toggle('active',n&&n.textContent===m);
     });
-    toast('Model set to '+m,'success');
-  }).catch(err=>toast('Failed: '+err.message,'error'));
+  }).catch(function(err){toast('Failed: '+err.message,'error')});
 }
 document.addEventListener('click',()=>{
   const dd=document.getElementById('model-dropdown');if(dd)dd.classList.remove('open');
@@ -552,7 +577,6 @@ function setProtocol(p){
     b.classList.toggle('active',b.textContent.toLowerCase().replace('-','-')===p);
   });
 }
-
 // ── /command autocomplete ──
 function handleChatInput(e){
   const val=e.target.value;
@@ -963,96 +987,124 @@ async function viewMemory(key){
 }
 
 
+
 // ═══════════════════════════════════
-// PROVIDER
+// PROVIDER — multi-provider with unified model dropdown
 // ═══════════════════════════════════
-const PROVIDERS={
+
+var PROVIDER_DEFS={
   gemini:{name:'Google Gemini',models:['gemini-3.1-pro-preview','gemini-3.1-flash-lite-preview']},
   openai:{name:'OpenAI',models:['gpt-5.4','gpt-5.4-mini','gpt-5.4-nano']},
 };
+
+var PROV_KEY_STORE='rl_prov_keys';
+function getProvKeys(){try{return JSON.parse(localStorage.getItem(PROV_KEY_STORE)||'{}')}catch(e){return{}}}
+function saveProvKey(provider,key){
+  var ks=getProvKeys();
+  if(key) ks[provider]=key; else delete ks[provider];
+  localStorage.setItem(PROV_KEY_STORE,JSON.stringify(ks));
+}
+
+function buildUnifiedModelList(){
+  var keys=getProvKeys();
+  var list=[];
+  Object.keys(PROVIDER_DEFS).forEach(function(pk){
+    if(!keys[pk])return;
+    PROVIDER_DEFS[pk].models.forEach(function(m){
+      list.push({provider:pk,model:m,label:PROVIDER_DEFS[pk].name+' / '+m});
+    });
+  });
+  return list;
+}
+
+function activateProviderModel(provider,model,newKey){
+  var keys=getProvKeys();
+  var apiKey=newKey||keys[provider]||'';
+  if(!apiKey){toast('No API key for '+PROVIDER_DEFS[provider].name,'error');return Promise.reject('no key')}
+  if(newKey) saveProvKey(provider,newKey);
+  return API.put('/api/v1/provider',{provider:provider,apiKey:apiKey,model:model}).then(function(d){
+    state.provider=d;state.provider.configured=true;state.provider.provider=provider;state.provider.model=model;
+    toast('Switched to '+PROVIDER_DEFS[provider].name+' / '+model,'success');
+  });
+}
+
+function switchModel(targetProv,model){
+  var curProv=(state.provider&&state.provider.provider)||'';
+  if(targetProv===curProv&&state.provider&&state.provider.configured){
+    return API.put('/api/v1/provider/model',{model:model}).then(function(){
+      state.provider.model=model;
+      toast('Model: '+model,'success');
+    });
+  }
+  return activateProviderModel(targetProv,model);
+}
 
 function renderProvider(c){
   c.innerHTML='<div style="text-align:center;padding:20px;color:var(--text-2)">Loading...</div>';
   API.get('/api/v1/provider').then(function(data){
     state.provider=data;
-    var cfg=data.configured,models=data.models||[];
-    var curProv=data.provider||(data.saved&&data.saved.provider)||'';
-    var curModel=data.model||'';
-    var sv=data.saved||{};
-    var h='';
+    var cfg=data.configured,curProv=data.provider||'',curModel=data.model||'';
+    var sv=data.saved||{},keys=getProvKeys(),h='';
 
-    // Status banner
     var bannerBg=cfg?'var(--green-dim)':'var(--amber-dim)';
-    var bannerBorder=cfg?'rgba(34,197,94,0.15)':'rgba(245,158,11,0.15)';
-    var dotColor=cfg?'var(--green)':'var(--amber)';
-    h+='<div class="prov-banner" style="background:'+bannerBg+';border-color:'+bannerBorder+'">';
-    h+='<div class="dot" style="background:'+dotColor+'"></div>';
-    h+='<span class="label">'+(cfg?'Active: '+escHtml(curProv)+' / '+escHtml(curModel):'No provider configured')+'</span>';
-    if(!cfg) h+='<span class="sub">Set up a provider below to start chatting</span>';
+    var bannerBdr=cfg?'rgba(34,197,94,0.15)':'rgba(245,158,11,0.15)';
+    var dotC=cfg?'var(--green)':'var(--amber)';
+    h+='<div class="prov-banner" style="background:'+bannerBg+';border-color:'+bannerBdr+'">';
+    h+='<div class="dot" style="background:'+dotC+'"></div>';
+    h+='<span class="label">'+(cfg?'Active: '+escHtml(curProv)+' / '+escHtml(curModel):'No provider active')+'</span>';
     h+='</div>';
 
-    // Provider cards — 2-column grid
     h+='<div class="prov-grid">';
-    var keys=Object.keys(PROVIDERS);
-    keys.forEach(function(key){
-      var def=PROVIDERS[key];
-      var isActive=key===curProv&&cfg;
-      var isSaved=sv.provider===key&&sv.hasKey;
-      var dotC=isActive?'var(--green)':isSaved?'var(--amber)':'var(--text-2)';
-      var statusText=isActive?'Active':isSaved?'Saved':'Not set';
-      var statusBg=isActive?'var(--green-dim)':isSaved?'var(--amber-dim)':'var(--bg-hover)';
-      var statusColor=isActive?'var(--green)':isSaved?'var(--amber)':'var(--text-2)';
-      var savedKeyInfo=isSaved?(sv.apiKeyMasked||'****'):'';
+    Object.keys(PROVIDER_DEFS).forEach(function(pk){
+      var def=PROVIDER_DEFS[pk];
+      var isActive=pk===curProv&&cfg;
+      var hasKey=!!keys[pk];
+      var dotColor=isActive?'var(--green)':hasKey?'var(--amber)':'var(--text-2)';
+      var statusText=isActive?'Active':hasKey?'Ready':'Not set';
+      var statusBg=isActive?'var(--green-dim)':hasKey?'var(--amber-dim)':'var(--bg-hover)';
+      var statusColor=isActive?'var(--green)':hasKey?'var(--amber)':'var(--text-2)';
+      var masked=hasKey?(keys[pk].substring(0,4)+'...'+keys[pk].slice(-4)):'';
 
       h+='<div class="prov-card'+(isActive?' active-prov':'')+'">';
-
-      // Header
       h+='<div class="prov-card-hdr">';
-      h+='<div class="dot" style="background:'+dotC+'"></div>';
+      h+='<div class="dot" style="background:'+dotColor+'"></div>';
       h+='<span class="name">'+escHtml(def.name)+'</span>';
       h+='<span class="status" style="background:'+statusBg+';color:'+statusColor+'">'+statusText+'</span>';
-      h+='</div>';
+      h+='</div><div class="prov-card-body">';
 
-      // Body
-      h+='<div class="prov-card-body">';
-
-      // API Key
       h+='<div class="form-group"><label class="form-label">API Key';
-      if(isSaved) h+=' <span style="color:var(--green);text-transform:none;font-weight:500">('+escHtml(savedKeyInfo)+')</span>';
-      h+='</label>';
-      h+='<div style="position:relative">';
-      h+='<input type="password" id="prov-key-'+key+'" placeholder="'+(isSaved?'Leave empty to keep current':'Enter API key...')+'" style="padding-right:36px">';
-      h+='<button onclick="document.getElementById(\'prov-key-'+key+'\').type=document.getElementById(\'prov-key-'+key+'\').type===\'password\'?\'text\':\'password\'" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-2);cursor:pointer;padding:4px" title="Show/hide">';
+      if(hasKey) h+=' <span style="color:var(--green);text-transform:none;font-weight:500">('+escHtml(masked)+')</span>';
+      h+='</label><div style="position:relative">';
+      h+='<input type="password" id="prov-key-'+pk+'" placeholder="'+(hasKey?'Leave empty to keep current':'Enter API key...')+'" style="padding-right:36px">';
+      h+='<button class="eye-btn" onclick="document.getElementById(\'prov-key-'+pk+'\').type=document.getElementById(\'prov-key-'+pk+'\').type===\'password\'?\'text\':\'password\'" title="Show/hide">';
       h+='<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
       h+='</button></div></div>';
 
-      // Model pills
-      h+='<div class="form-group"><label class="form-label">Model</label>';
+      var prefModel=isActive?curModel:def.models[0];
+      h+='<div class="form-group"><label class="form-label">Default Model</label>';
       h+='<div class="prov-model-pills">';
       def.models.forEach(function(m){
-        var mActive=m===curModel&&isActive;
-        h+='<button type="button" class="prov-model-pill'+(mActive?' active':'')+'" onclick="document.getElementById(\'prov-model-'+key+'\').value=\''+m+'\'">'+m+'</button>';
+        h+='<button type="button" class="prov-model-pill'+(m===prefModel?' active':'')+'" onclick="document.getElementById(\'prov-model-'+pk+'\').value=\''+m+'\'">'+m+'</button>';
       });
       h+='</div>';
-      h+='<input type="text" id="prov-model-'+key+'" value="'+(isActive?escHtml(curModel):isSaved&&sv.model?escHtml(sv.model):'')+'" placeholder="Type or pick a model..." style="font-family:IBM Plex Mono,monospace;font-size:12px">';
+      h+='<input type="text" id="prov-model-'+pk+'" value="'+escHtml(prefModel)+'" placeholder="Type or pick..." style="font-family:IBM Plex Mono,monospace;font-size:12px">';
       h+='</div>';
 
-      // Activate
       h+='<div class="prov-activate-row">';
-      h+='<button class="btn '+(isActive?'btn-ghost':'btn-primary')+'" onclick="activateProv(\''+key+'\')" style="padding:7px 20px">'+(isActive?'Restart':'Activate')+'</button>';
-      h+='</div>';
-
-      h+='</div></div>'; // close body + card
+      h+='<button class="btn '+(isActive?'btn-ghost':'btn-primary')+'" onclick="saveAndActivate(\''+pk+'\')">'+(isActive?'Restart':'Save & Activate')+'</button>';
+      h+='</div></div></div>';
     });
-    h+='</div>'; // close grid
+    h+='</div>';
 
-    // Quick model switch
-    if(cfg&&models.length){
-      h+='<div class="card prov-quick">';
-      h+='<div class="prov-quick-label">Quick Model Switch</div>';
+    var allModels=buildUnifiedModelList();
+    if(allModels.length){
+      h+='<div class="card prov-quick" style="margin-top:20px">';
+      h+='<div class="prov-quick-label">All Models</div>';
+      h+='<div style="font-size:11.5px;color:var(--text-2);margin-bottom:12px">Pick any model — provider switches automatically</div>';
       h+='<div class="prov-quick-pills">';
-      models.forEach(function(m){
-        h+='<button class="btn '+(m===curModel?'btn-primary':'btn-ghost')+' btn-sm" onclick="quickSetModel(\''+escHtml(m)+'\')">'+escHtml(m)+'</button>';
+      allModels.forEach(function(item){
+        var isActive=item.provider===curProv&&item.model===curModel;
+        h+='<button class="btn '+(isActive?'btn-primary':'btn-ghost')+' btn-sm" onclick="quickSwitch(\''+item.provider+'\',\''+escHtml(item.model)+'\')">'+escHtml(item.label)+'</button>';
       });
       h+='</div></div>';
     }
@@ -1063,26 +1115,18 @@ function renderProvider(c){
   });
 }
 
-function activateProv(key){
-  var apiKey=document.getElementById('prov-key-'+key).value.trim();
-  var model=document.getElementById('prov-model-'+key).value.trim();
-  if(!model){toast('Model is required','error');return}
-  var hasExisting=state.provider&&state.provider.configured;
-  if(!apiKey&&!hasExisting){toast('API key is required','error');return}
-  if(!apiKey&&hasExisting){
-    API.put('/api/v1/provider/model',{model:model}).then(function(){
-      toast('Model updated','success');renderProvider(document.getElementById('main-content'));
-    }).catch(function(e){toast('Failed: '+e.message,'error')});
-  }else{
-    API.put('/api/v1/provider',{provider:key,apiKey:apiKey,model:model}).then(function(d){
-      toast('Connected: '+d.provider+' / '+d.model,'success');renderProvider(document.getElementById('main-content'));
-    }).catch(function(e){toast('Failed: '+e.message,'error')});
-  }
+function saveAndActivate(pk){
+  var newKey=document.getElementById('prov-key-'+pk).value.trim();
+  var model=document.getElementById('prov-model-'+pk).value.trim();
+  if(!model){toast('Pick a model','error');return}
+  activateProviderModel(pk,model,newKey).then(function(){
+    renderProvider(document.getElementById('main-content'));
+  }).catch(function(e){toast('Failed: '+e.message,'error')});
 }
 
-function quickSetModel(m){
-  API.put('/api/v1/provider/model',{model:m}).then(function(){
-    toast('Model set to '+m,'success');renderProvider(document.getElementById('main-content'));
+function quickSwitch(prov,model){
+  switchModel(prov,model).then(function(){
+    renderProvider(document.getElementById('main-content'));
   }).catch(function(e){toast('Failed: '+e.message,'error')});
 }
 

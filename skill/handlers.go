@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/ratrektlabs/rakit/tool"
 )
 
 // HTTPTool is a tool that calls an HTTP endpoint.
 type HTTPTool struct {
-	name        string
-	description string
-	parameters  any
-	endpoint    string
-	headers     map[string]string
-	inputMap    map[string]string
+	name         string
+	description  string
+	parameters   any
+	endpoint     string
+	headers      map[string]string
+	inputMap     map[string]string
+	responseField string
 }
 
 func (t *HTTPTool) Name() string        { return t.name }
@@ -90,6 +93,16 @@ func (t *HTTPTool) Execute(ctx context.Context, input map[string]any) (*tool.Res
 		if err := json.Unmarshal(respBody, &result); err != nil {
 			return tool.Ok(string(respBody)), nil
 		}
+
+		// Extract a specific field if responseField is set
+		if t.responseField != "" {
+			if m, ok := result.(map[string]any); ok {
+				if v, ok := m[t.responseField]; ok {
+					result = v
+				}
+			}
+		}
+
 		return tool.Ok(result), nil
 	})
 }
@@ -124,21 +137,50 @@ func (t *ScriptTool) Execute(ctx context.Context, input map[string]any) (*tool.R
 			), nil
 		}
 
-		// Script execution is a placeholder — actual implementation depends on
-		// the runtime environment (sandboxed exec, WASM, etc.)
-		return tool.Ok(string(data)), nil
+		// Determine the interpreter from the file extension
+		ext := filepath.Ext(t.scriptPath)
+		var cmd *exec.Cmd
+		switch ext {
+		case ".sh", ".bash":
+			cmd = exec.CommandContext(ctx, "bash", "-c", string(data))
+		case ".py":
+			cmd = exec.CommandContext(ctx, "python3", "-c", string(data))
+		case ".js", ".mjs":
+			cmd = exec.CommandContext(ctx, "node", "--input-type=module", "-")
+			cmd.Stdin = bytes.NewReader(data)
+		default:
+			// Try bash as fallback
+			cmd = exec.CommandContext(ctx, "bash", "-c", string(data))
+		}
+
+		// Pass tool input as JSON via stdin (if not already set for JS)
+		if ext != ".js" && ext != ".mjs" {
+			inputJSON, _ := json.Marshal(input)
+			cmd.Stdin = bytes.NewReader(inputJSON)
+		}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return tool.Err(
+				fmt.Sprintf("script error: %v\n%s", err, string(output)),
+				fmt.Sprintf("Check the script at %q for errors", t.scriptPath),
+			), nil
+		}
+
+		return tool.Ok(string(output)), nil
 	})
 }
 
 // NewHTTPTool creates an HTTPTool from its constituent parts.
-func NewHTTPTool(name, description string, parameters any, endpoint string, headers map[string]string, inputMap map[string]string) *HTTPTool {
+func NewHTTPTool(name, description string, parameters any, endpoint string, headers map[string]string, inputMap map[string]string, responseField string) *HTTPTool {
 	return &HTTPTool{
-		name:        name,
-		description: description,
-		parameters:  parameters,
-		endpoint:    endpoint,
-		headers:     headers,
-		inputMap:    inputMap,
+		name:          name,
+		description:   description,
+		parameters:    parameters,
+		endpoint:      endpoint,
+		headers:       headers,
+		inputMap:      inputMap,
+		responseField: responseField,
 	}
 }
 
@@ -160,7 +202,7 @@ func ToolFromDef(def ToolDef, rm *ResourceManager) (tool.Tool, error) {
 		if def.Endpoint == "" {
 			return nil, fmt.Errorf("tool %q: http handler requires an endpoint", def.Name)
 		}
-		return NewHTTPTool(def.Name, def.Description, def.Parameters, def.Endpoint, def.Headers, def.InputMapping), nil
+		return NewHTTPTool(def.Name, def.Description, def.Parameters, def.Endpoint, def.Headers, def.InputMapping, def.ResponseField), nil
 	case "script":
 		if def.ScriptPath == "" {
 			return nil, fmt.Errorf("tool %q: script handler requires a script_path", def.Name)

@@ -13,21 +13,23 @@ import (
 )
 
 const (
-	collSessions = "sessions"
-	collTools    = "tools"
-	collSkills   = "skills"
-	collMemory   = "memory"
+	collSessions   = "sessions"
+	collTools      = "tools"
+	collSkills     = "skills"
+	collMemory     = "memory"
+	collMCPServers = "mcp_servers"
 )
 
 // Store implements metadata.Store backed by MongoDB.
 type Store struct {
-	client   *mongo.Client
-	db       *mongo.Database
-	dbName   string
-	sessions *mongo.Collection
-	tools    *mongo.Collection
-	skills   *mongo.Collection
-	memory   *mongo.Collection
+	client     *mongo.Client
+	db         *mongo.Database
+	dbName     string
+	sessions   *mongo.Collection
+	tools      *mongo.Collection
+	skills     *mongo.Collection
+	memory     *mongo.Collection
+	mcpServers *mongo.Collection
 }
 
 // NewStore connects to MongoDB at uri, selects the given database, and returns
@@ -46,13 +48,14 @@ func NewStore(ctx context.Context, uri, dbName string) (*Store, error) {
 
 	db := client.Database(dbName)
 	s := &Store{
-		client:   client,
-		db:       db,
-		dbName:   dbName,
-		sessions: db.Collection(collSessions),
-		tools:    db.Collection(collTools),
-		skills:   db.Collection(collSkills),
-		memory:   db.Collection(collMemory),
+		client:     client,
+		db:         db,
+		dbName:     dbName,
+		sessions:   db.Collection(collSessions),
+		tools:      db.Collection(collTools),
+		skills:     db.Collection(collSkills),
+		memory:     db.Collection(collMemory),
+		mcpServers: db.Collection(collMCPServers),
 	}
 	return s, nil
 }
@@ -66,11 +69,12 @@ func (s *Store) Close(ctx context.Context) error {
 // Sessions
 // ---------------------------------------------------------------------------
 
-func (s *Store) CreateSession(ctx context.Context, agentID string) (*metadata.Session, error) {
+func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().Unix()
 	sess := &metadata.Session{
 		ID:        newID(),
 		AgentID:   agentID,
+		UserID:    userID,
 		Messages:  []metadata.Message{},
 		State:     map[string]any{},
 		CreatedAt: now,
@@ -122,6 +126,32 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 	cursor, err := s.sessions.Find(ctx, bson.D{{Key: "agentid", Value: agentID}})
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var sessions []*metadata.Session
+	for cursor.Next(ctx) {
+		var sess metadata.Session
+		if err := cursor.Decode(&sess); err != nil {
+			return nil, fmt.Errorf("decode session: %w", err)
+		}
+		sess.Messages = []metadata.Message{}
+		sessions = append(sessions, &sess)
+	}
+	if sessions == nil {
+		sessions = []*metadata.Session{}
+	}
+	return sessions, nil
+}
+
+func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
+	filter := bson.D{
+		{Key: "agentid", Value: agentID},
+		{Key: "userid", Value: userID},
+	}
+	cursor, err := s.sessions.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions by user: %w", err)
 	}
 	defer cursor.Close(ctx)
 
@@ -250,7 +280,7 @@ func (s *Store) DeleteSkill(ctx context.Context, name string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Memory (key-value)
+// Scoped Memory
 // ---------------------------------------------------------------------------
 
 // memoryDoc is the internal BSON document shape for the memory collection.
@@ -259,55 +289,55 @@ type memoryDoc struct {
 	Value []byte `bson:"value"`
 }
 
-func (s *Store) Set(ctx context.Context, key string, value []byte) error {
-	doc := memoryDoc{Key: key, Value: value}
+func (s *Store) SetMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string, value []byte) error {
+	compositeKey := metadata.ScopedKey(scope, scopeID, key)
+	doc := memoryDoc{Key: compositeKey, Value: value}
 	opts := options.Replace().SetUpsert(true)
-	_, err := s.memory.ReplaceOne(ctx, bson.D{{Key: "key", Value: key}}, doc, opts)
+	_, err := s.memory.ReplaceOne(ctx, bson.D{{Key: "key", Value: compositeKey}}, doc, opts)
 	if err != nil {
-		return fmt.Errorf("set memory %q: %w", key, err)
+		return fmt.Errorf("set memory %q: %w", compositeKey, err)
 	}
 	return nil
 }
 
-func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *Store) GetMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string) ([]byte, error) {
+	compositeKey := metadata.ScopedKey(scope, scopeID, key)
 	var doc memoryDoc
-	err := s.memory.FindOne(ctx, bson.D{{Key: "key", Value: key}}).Decode(&doc)
+	err := s.memory.FindOne(ctx, bson.D{{Key: "key", Value: compositeKey}}).Decode(&doc)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get memory %q: %w", key, err)
+		return nil, fmt.Errorf("get memory %q: %w", compositeKey, err)
 	}
 	return doc.Value, nil
 }
 
-func (s *Store) Delete(ctx context.Context, key string) error {
-	_, err := s.memory.DeleteOne(ctx, bson.D{{Key: "key", Value: key}})
+func (s *Store) DeleteMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string) error {
+	compositeKey := metadata.ScopedKey(scope, scopeID, key)
+	_, err := s.memory.DeleteOne(ctx, bson.D{{Key: "key", Value: compositeKey}})
 	if err != nil {
-		return fmt.Errorf("delete memory %q: %w", key, err)
+		return fmt.Errorf("delete memory %q: %w", compositeKey, err)
 	}
 	return nil
 }
 
-func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
-	filter := bson.D{}
-	if prefix != "" {
-		// Use a regex anchored at the start to match the prefix.
-		filter = bson.D{{
-			Key: "key",
-			Value: bson.D{{
-				Key:   "$regex",
-				Value: "^" + escapeRegex(prefix),
-			}},
-		}}
-	}
+func (s *Store) ListMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, prefix string) ([]string, error) {
+	compositePrefix := metadata.ScopedKey(scope, scopeID, prefix)
+	filter := bson.D{{
+		Key: "key",
+		Value: bson.D{{
+			Key:   "$regex",
+			Value: "^" + escapeRegex(compositePrefix),
+		}},
+	}}
 
 	projection := bson.D{{Key: "key", Value: 1}}
 	opts := options.Find().SetProjection(projection)
 
 	cursor, err := s.memory.Find(ctx, filter, opts)
 	if err != nil {
-		return nil, fmt.Errorf("list memory prefix %q: %w", prefix, err)
+		return nil, fmt.Errorf("list memory prefix %q: %w", compositePrefix, err)
 	}
 	defer cursor.Close(ctx)
 
@@ -325,6 +355,26 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		return nil, fmt.Errorf("cursor error: %w", err)
 	}
 	return keys, nil
+}
+
+// ---------------------------------------------------------------------------
+// Legacy flat KV (delegates to global-scoped memory)
+// ---------------------------------------------------------------------------
+
+func (s *Store) Set(ctx context.Context, key string, value []byte) error {
+	return s.SetMemory(ctx, metadata.ScopeGlobal, "", key, value)
+}
+
+func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+	return s.GetMemory(ctx, metadata.ScopeGlobal, "", key)
+}
+
+func (s *Store) Delete(ctx context.Context, key string) error {
+	return s.DeleteMemory(ctx, metadata.ScopeGlobal, "", key)
+}
+
+func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.ListMemory(ctx, metadata.ScopeGlobal, "", prefix)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,3 +402,53 @@ func escapeRegex(s string) string {
 
 // Verify interface compliance at compile time.
 var _ metadata.Store = (*Store)(nil)
+
+// ---------------------------------------------------------------------------
+// MCP Servers
+// ---------------------------------------------------------------------------
+
+func (s *Store) SaveMCPServer(ctx context.Context, srv *metadata.MCPServerDef) error {
+	if srv == nil {
+		return fmt.Errorf("save mcp server: nil server")
+	}
+	opts := options.Replace().SetUpsert(true)
+	_, err := s.mcpServers.ReplaceOne(ctx, bson.D{{Key: "name", Value: srv.Name}}, srv, opts)
+	if err != nil {
+		return fmt.Errorf("save mcp server %q: %w", srv.Name, err)
+	}
+	return nil
+}
+
+func (s *Store) GetMCPServer(ctx context.Context, name string) (*metadata.MCPServerDef, error) {
+	var srv metadata.MCPServerDef
+	err := s.mcpServers.FindOne(ctx, bson.D{{Key: "name", Value: name}}).Decode(&srv)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get mcp server %q: %w", name, err)
+	}
+	return &srv, nil
+}
+
+func (s *Store) ListMCPServers(ctx context.Context, agentID string) ([]*metadata.MCPServerDef, error) {
+	cursor, err := s.mcpServers.Find(ctx, bson.D{{Key: "agentid", Value: agentID}})
+	if err != nil {
+		return nil, fmt.Errorf("list mcp servers for agent %q: %w", agentID, err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []*metadata.MCPServerDef
+	if err = cursor.All(ctx, &results); err != nil {
+		return nil, fmt.Errorf("decode mcp servers: %w", err)
+	}
+	return results, nil
+}
+
+func (s *Store) DeleteMCPServer(ctx context.Context, name string) error {
+	_, err := s.mcpServers.DeleteOne(ctx, bson.D{{Key: "name", Value: name}})
+	if err != nil {
+		return fmt.Errorf("delete mcp server %q: %w", name, err)
+	}
+	return nil
+}

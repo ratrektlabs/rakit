@@ -21,14 +21,15 @@ type Definition struct {
 
 // ToolDef describes a tool provided by a skill.
 type ToolDef struct {
-	Name         string            `json:"name"`
-	Description  string            `json:"description"`
-	Parameters   any               `json:"parameters"`
-	Handler      string            `json:"handler"` // "http", "script"
-	Endpoint     string            `json:"endpoint,omitempty"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	InputMapping map[string]string `json:"input_mapping,omitempty"`
-	ScriptPath   string            `json:"script_path,omitempty"`
+	Name          string            `json:"name"`
+	Description   string            `json:"description"`
+	Parameters    any               `json:"parameters"`
+	Handler       string            `json:"handler"` // "http", "script"
+	Endpoint      string            `json:"endpoint,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	InputMapping  map[string]string `json:"input_mapping,omitempty"`
+	ResponseField string            `json:"response_field,omitempty"` // JSON field to extract from response
+	ScriptPath    string            `json:"script_path,omitempty"`
 }
 
 // Resource references an L3 asset in blob storage.

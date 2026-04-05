@@ -53,3 +53,34 @@ func Measure(fn func() (*Result, error)) (*Result, error) {
 	res.ExecutedAt = start.UnixMilli()
 	return res, nil
 }
+
+// ExecuteFunc is the signature for a tool function used by FunctionTool.
+type ExecuteFunc func(ctx context.Context, input map[string]any) (*Result, error)
+
+// FunctionTool is a convenience adapter that wraps a Go function as a Tool.
+type FunctionTool struct {
+	name        string
+	description string
+	parameters  any
+	fn          ExecuteFunc
+}
+
+func (t *FunctionTool) Name() string        { return t.name }
+func (t *FunctionTool) Description() string { return t.description }
+func (t *FunctionTool) Parameters() any     { return t.parameters }
+
+func (t *FunctionTool) Execute(ctx context.Context, input map[string]any) (*Result, error) {
+	return Measure(func() (*Result, error) {
+		return t.fn(ctx, input)
+	})
+}
+
+// NewFunctionTool creates a Tool from a Go function.
+func NewFunctionTool(name, description string, parameters any, fn ExecuteFunc) *FunctionTool {
+	return &FunctionTool{
+		name:        name,
+		description: description,
+		parameters:  parameters,
+		fn:          fn,
+	}
+}

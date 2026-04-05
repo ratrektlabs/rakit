@@ -45,6 +45,11 @@ func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan pr
 	}
 
 	config := &genai.GenerateContentConfig{}
+	if req.System != "" {
+		config.SystemInstruction = &genai.Content{
+			Parts: []*genai.Part{{Text: req.System}},
+		}
+	}
 	if req.MaxTokens > 0 {
 		config.MaxOutputTokens = int32(req.MaxTokens)
 	}
@@ -95,9 +100,10 @@ func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan pr
 					case part.FunctionCall != nil:
 						args, _ := json.Marshal(part.FunctionCall.Args)
 						events <- &provider.ToolCallEvent{
-							ID:        part.FunctionCall.Name,
-							Name:      part.FunctionCall.Name,
-							Arguments: string(args),
+							ID:              part.FunctionCall.Name,
+							Name:            part.FunctionCall.Name,
+							Arguments:       string(args),
+							ThoughtSignature: part.ThoughtSignature,
 						}
 					}
 				}
@@ -117,6 +123,11 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 	}
 
 	config := &genai.GenerateContentConfig{}
+	if req.System != "" {
+		config.SystemInstruction = &genai.Content{
+			Parts: []*genai.Part{{Text: req.System}},
+		}
+	}
 	if req.MaxTokens > 0 {
 		config.MaxOutputTokens = int32(req.MaxTokens)
 	}
@@ -155,9 +166,10 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
 				result.ToolCalls = append(result.ToolCalls, provider.ToolCall{
-					ID:        part.FunctionCall.Name,
-					Name:      part.FunctionCall.Name,
-					Arguments: string(args),
+					ID:              part.FunctionCall.Name,
+					Name:            part.FunctionCall.Name,
+					Arguments:       string(args),
+					ThoughtSignature: part.ThoughtSignature,
 				})
 			}
 		}
@@ -196,26 +208,48 @@ func toGeminiContents(messages []provider.Message) ([]*genai.Content, error) {
 					Name: tc.Name,
 					Args: args,
 				},
+				ThoughtSignature: tc.ThoughtSignature,
 			})
 		}
 
 		// Handle tool results
 		if msg.Role == "tool" {
 			var respParts []*genai.Part
-			for _, tc := range msg.ToolCalls {
-				respParts = append(respParts, &genai.Part{
-					FunctionResponse: &genai.FunctionResponse{
-						Name: tc.Name,
-						Response: map[string]any{
-							"result": tc.Arguments,
+			if len(msg.ToolCalls) > 0 {
+				// Tool result with matching call names from ToolCalls
+				for _, tc := range msg.ToolCalls {
+					respParts = append(respParts, &genai.Part{
+						FunctionResponse: &genai.FunctionResponse{
+							Name: tc.Name,
+							Response: map[string]any{
+								"result": msg.Content,
+							},
 						},
-					},
+					})
+				}
+			} else if msg.Content != "" {
+				// Tool result stored as Content (parse JSON to get name+result)
+				var resultData map[string]any
+				if json.Unmarshal([]byte(msg.Content), &resultData) == nil {
+					// Try to find name/result fields
+					for name, val := range resultData {
+						respParts = append(respParts, &genai.Part{
+							FunctionResponse: &genai.FunctionResponse{
+								Name: name,
+								Response: map[string]any{
+									"result": val,
+								},
+							},
+						})
+					}
+				}
+			}
+			if len(respParts) > 0 {
+				contents = append(contents, &genai.Content{
+					Role:  "user",
+					Parts: respParts,
 				})
 			}
-			contents = append(contents, &genai.Content{
-				Role:  "function",
-				Parts: respParts,
-			})
 			continue
 		}
 

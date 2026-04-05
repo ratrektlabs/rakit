@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/ratrektlabs/rakit/protocol"
@@ -32,7 +33,7 @@ func (a *Agent) RunWithProtocol(
 		return nil, fmt.Errorf("agent: no protocol configured")
 	}
 
-	registry, err := a.buildMergedRegistry(ctx)
+	registry, systemPrompt, err := a.buildMergedRegistry(ctx)
 	if err != nil {
 		log.Printf("warning: failed to load dynamic tools: %v", err)
 		registry = a.Tools // fallback to static tools only
@@ -53,6 +54,7 @@ func (a *Agent) RunWithProtocol(
 			Model:    a.Provider.Model(),
 			Messages: []provider.Message{{Role: "user", Content: input}},
 			Tools:    registry.Schema(),
+			System:   systemPrompt,
 		}
 
 		stream, err := a.Provider.Stream(ctx, req)
@@ -100,8 +102,8 @@ func (a *Agent) RunWithProtocol(
 
 // RunWithSession starts the agent with session persistence, compaction, and an agentic loop.
 // It loads the session, merges tools from skills + persisted tools + static tools,
-// then loops: stream from provider → accumulate text + tool calls → execute tools →
-// feed results back → loop until text-only response or max iterations.
+// then loops: stream from provider -> accumulate text + tool calls -> execute tools ->
+// feed results back -> loop until text-only response or max iterations.
 func (a *Agent) RunWithSession(
 	ctx context.Context,
 	sessionID string,
@@ -145,13 +147,6 @@ func (a *Agent) RunWithSession(
 		}
 	}
 
-	// 4. Build merged tool registry (skill tools + persisted tools + static tools)
-	registry, err := a.buildMergedRegistry(ctx)
-	if err != nil {
-		log.Printf("warning: failed to load dynamic tools: %v", err)
-		registry = a.Tools
-	}
-
 	events := make(chan protocol.Event, 100)
 
 	go func() {
@@ -172,11 +167,19 @@ func (a *Agent) RunWithSession(
 				return
 			}
 
+			// 4. Build merged tool registry per-iteration (dynamic tool loading)
+			registry, systemPrompt, err := a.buildMergedRegistry(ctx)
+			if err != nil {
+				log.Printf("warning: failed to load dynamic tools: %v", err)
+				registry = a.Tools
+			}
+
 			// Build request
 			req := &provider.Request{
 				Model:    a.Provider.Model(),
 				Messages: providerMsgs,
 				Tools:    registry.Schema(),
+				System:   systemPrompt,
 			}
 
 			// Stream from provider
@@ -209,9 +212,10 @@ func (a *Agent) RunWithSession(
 					responseContent += ev.Delta
 				case *provider.ToolCallEvent:
 					responseToolCalls = append(responseToolCalls, provider.ToolCall{
-						ID:        ev.ID,
-						Name:      ev.Name,
-						Arguments: ev.Arguments,
+						ID:               ev.ID,
+						Name:             ev.Name,
+						Arguments:        ev.Arguments,
+						ThoughtSignature: ev.ThoughtSignature,
 					})
 				}
 
@@ -261,29 +265,47 @@ func (a *Agent) RunWithSession(
 			}
 			providerMsgs = append(providerMsgs, assistantMsg)
 
+			tcRecords := providerToolCallsToRecords(responseToolCalls)
+			assistantMsgIdx := len(sess.Messages)
 			sess.Messages = append(sess.Messages, metadata.Message{
 				ID:        generateID(),
 				Role:      "assistant",
 				Content:   responseContent,
-				ToolCalls: providerToolCallsToRecords(responseToolCalls),
+				ToolCalls: tcRecords,
 				CreatedAt: time.Now().UnixMilli(),
 			})
 
-			// Execute each tool call
+			// Emit tool call arguments so clients can display request data
 			for _, tc := range responseToolCalls {
+				events <- &protocol.ToolCallArgsEvent{
+					ToolCallID: tc.ID,
+					Delta:      tc.Arguments,
+				}
+			}
+
+			// Execute each tool call
+			for i, tc := range responseToolCalls {
 				t := registry.Get(tc.Name)
 				if t == nil {
 					resultJSON, _ := json.Marshal(map[string]string{
 						"error": fmt.Sprintf("tool %q not found", tc.Name),
 					})
+					resultStr := string(resultJSON)
 					providerMsgs = append(providerMsgs, provider.Message{
-						Role:    "tool",
-						Content: string(resultJSON),
+						Role:      "tool",
+						Content:   resultStr,
+						ToolCalls: []provider.ToolCall{{Name: tc.Name}},
 					})
+
+					// Backfill result into session message
+					if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
+						sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
+						sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
+					}
 
 					events <- &protocol.ToolResultEvent{
 						ToolCallID: tc.ID,
-						Result:     string(resultJSON),
+						Result:     resultStr,
 					}
 					continue
 				}
@@ -293,31 +315,48 @@ func (a *Agent) RunWithSession(
 					resultJSON, _ := json.Marshal(map[string]string{
 						"error": fmt.Sprintf("invalid arguments: %v", err),
 					})
+					resultStr := string(resultJSON)
 					providerMsgs = append(providerMsgs, provider.Message{
-						Role:    "tool",
-						Content: string(resultJSON),
+						Role:      "tool",
+						Content:   resultStr,
+						ToolCalls: []provider.ToolCall{{Name: tc.Name}},
 					})
+
+					if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
+						sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
+						sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
+					}
 
 					events <- &protocol.ToolResultEvent{
 						ToolCallID: tc.ID,
-						Result:     string(resultJSON),
+						Result:     resultStr,
 					}
 					continue
 				}
 
 				result, err := t.Execute(ctx, input)
 				var resultStr string
+				var status string
 				if err != nil {
-					resultStr = fmt.Sprintf(`{"error": "%s"`, err.Error())
+					resultStr = fmt.Sprintf(`{"error": "%s"}`, err.Error())
+					status = "failed"
 				} else {
-					b, _ := json.Marshal(result)
+					b, _ := json.Marshal(result.Data)
 					resultStr = string(b)
+					status = "completed"
+				}
+
+				// Backfill result into session message
+				if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
+					sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
+					sess.Messages[assistantMsgIdx].ToolCalls[i].Status = status
 				}
 
 				// Append tool result for next iteration
 				providerMsgs = append(providerMsgs, provider.Message{
-					Role:    "tool",
-					Content: resultStr,
+					Role:      "tool",
+					Content:   resultStr,
+					ToolCalls: []provider.ToolCall{{Name: tc.Name}},
 				})
 
 				events <- &protocol.ToolResultEvent{
@@ -339,17 +378,91 @@ func (a *Agent) RunWithSession(
 	return events, nil
 }
 
+// RunSubagent spawns a child agent, creates a session, runs it, and collects the final text response.
+// This is the method called by the built-in spawn_agent tool.
+func (a *Agent) RunSubagent(ctx context.Context, parentSessionID, task, system string, p protocol.Protocol) (string, error) {
+	child := a.Spawn(ctx, parentSessionID, SubagentConfig{
+		System:       system,
+		InheritTools: true,
+	})
+
+	sess, err := child.CreateSession(ctx)
+	if err != nil {
+		return "", fmt.Errorf("subagent: create session: %w", err)
+	}
+
+	events, err := child.RunWithSession(ctx, sess.ID, task, p)
+	if err != nil {
+		return "", fmt.Errorf("subagent: run: %w", err)
+	}
+
+	// Collect all text deltas into the final response
+	var result strings.Builder
+	for e := range events {
+		if delta, ok := e.(*protocol.TextDeltaEvent); ok {
+			result.WriteString(delta.Delta)
+		}
+	}
+
+	return result.String(), nil
+}
+
+// SpawnAgentTool returns a tool.Tool that lets the LLM spawn subagents.
+func (a *Agent) SpawnAgentTool(p protocol.Protocol) tool.Tool {
+	return tool.NewFunctionTool(
+		"spawn_agent",
+		"Spawn a subagent to handle a subtask autonomously. The subagent inherits all tools and skills. Use this for complex subtasks that benefit from independent reasoning.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task": map[string]any{
+					"type":        "string",
+					"description": "The task or question for the subagent to handle",
+				},
+				"instructions": map[string]any{
+					"type":        "string",
+					"description": "System instructions for the subagent (optional)",
+				},
+			},
+			"required": []string{"task"},
+		},
+		func(ctx context.Context, input map[string]any) (*tool.Result, error) {
+			taskStr, _ := input["task"].(string)
+			instructions, _ := input["instructions"].(string)
+
+			// Get the session ID from context if available
+			sessionID := ""
+			if sid, ok := ctx.Value(sessionIDKey).(string); ok {
+				sessionID = sid
+			}
+
+			result, err := a.RunSubagent(ctx, sessionID, taskStr, instructions, p)
+			if err != nil {
+				return tool.Err(err.Error(), "Check that the agent has a provider configured"), nil
+			}
+			return tool.Ok(result), nil
+		},
+	)
+}
+
+// contextKey type for session ID in context
+type contextKey string
+
+const sessionIDKey contextKey = "sessionID"
+
 // buildMergedRegistry creates a per-run tool registry that merges tools from
-// enabled skills, persisted tool definitions, and statically registered tools.
-// Precedence: static tools > persisted tools > skill tools (last registered wins).
-func (a *Agent) buildMergedRegistry(ctx context.Context) (*tool.Registry, error) {
+// enabled skills, persisted tool definitions, MCP servers, and statically registered tools.
+// It also collects instructions from all enabled skills into a single system prompt.
+// Precedence: static tools > MCP tools > persisted tools > skill tools (last registered wins).
+func (a *Agent) buildMergedRegistry(ctx context.Context) (*tool.Registry, string, error) {
 	registry := tool.NewRegistry()
+	var instructions []string
 
 	// 1. Load tools from enabled skills
 	if a.Skills != nil && a.Store != nil {
 		entries, err := a.Skills.List(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list skills: %w", err)
+			return nil, "", fmt.Errorf("list skills: %w", err)
 		}
 
 		for _, entry := range entries {
@@ -363,8 +476,24 @@ func (a *Agent) buildMergedRegistry(ctx context.Context) (*tool.Registry, error)
 				continue
 			}
 
+			// Collect instructions
+			if def.Instructions != "" {
+				instructions = append(instructions, fmt.Sprintf("[%s]\n%s", def.Name, def.Instructions))
+			}
+
 			rm := skill.NewResourceManager(a.FS)
-			for _, td := range def.Tools {
+			for _, raw := range def.Tools {
+				// def.Tools is []any (from JSON storage); convert to skill.ToolDef
+				rawJSON, err := json.Marshal(raw)
+				if err != nil {
+					log.Printf("warning: failed to marshal tool def from skill %q: %v", entry.Name, err)
+					continue
+				}
+				var td skill.ToolDef
+				if err := json.Unmarshal(rawJSON, &td); err != nil {
+					log.Printf("warning: failed to unmarshal tool def from skill %q: %v", entry.Name, err)
+					continue
+				}
 				t, err := skill.ToolFromDef(td, rm)
 				if err != nil {
 					log.Printf("warning: failed to build tool %q from skill %q: %v", td.Name, entry.Name, err)
@@ -379,20 +508,21 @@ func (a *Agent) buildMergedRegistry(ctx context.Context) (*tool.Registry, error)
 	if a.Store != nil {
 		toolDefs, err := a.Store.ListTools(ctx, a.ID)
 		if err != nil {
-			return nil, fmt.Errorf("list tools: %w", err)
+			return nil, "", fmt.Errorf("list tools: %w", err)
 		}
 
 		rm := skill.NewResourceManager(a.FS)
 		for _, td := range toolDefs {
 			skillTD := skill.ToolDef{
-				Name:         td.Name,
-				Description:  td.Description,
-				Parameters:   td.Parameters,
-				Handler:      td.Handler,
-				Endpoint:     td.Endpoint,
-				Headers:      td.Headers,
-				InputMapping: td.InputMapping,
-				ScriptPath:   td.ScriptPath,
+				Name:          td.Name,
+				Description:   td.Description,
+				Parameters:    td.Parameters,
+				Handler:       td.Handler,
+				Endpoint:      td.Endpoint,
+				Headers:       td.Headers,
+				InputMapping:  td.InputMapping,
+				ResponseField: td.ResponseField,
+				ScriptPath:    td.ScriptPath,
 			}
 			t, err := skill.ToolFromDef(skillTD, rm)
 			if err != nil {
@@ -403,12 +533,24 @@ func (a *Agent) buildMergedRegistry(ctx context.Context) (*tool.Registry, error)
 		}
 	}
 
-	// 3. Static tools (highest priority — registered last, overwrites on collision)
+	// 3. Load tools from MCP servers
+	if a.MCP != nil {
+		mcpTools, err := a.MCP.DiscoverTools(ctx, a.ID)
+		if err != nil {
+			log.Printf("warning: MCP tool discovery failed: %v", err)
+		} else {
+			for _, t := range mcpTools {
+				registry.Register(t)
+			}
+		}
+	}
+
+	// 4. Static tools (highest priority — registered last, overwrites on collision)
 	for _, t := range a.Tools.All() {
 		registry.Register(t)
 	}
 
-	return registry, nil
+	return registry, strings.Join(instructions, "\n\n"), nil
 }
 
 func convertEvent(e provider.Event) protocol.Event {

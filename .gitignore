@@ -65,3 +65,12 @@ temp/
 coverage.txt
 coverage.html
 local
+
+# Playwright
+.playwright-cli/
+playwright-report/
+test-results/
+node_modules/
+package.json
+package-lock.json
+e2e.test.mjs

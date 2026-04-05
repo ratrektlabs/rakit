@@ -55,11 +55,13 @@ func (s *Store) Close() error {
 func (s *Store) migrate(ctx context.Context) error {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
-			id         TEXT PRIMARY KEY,
-			agent_id   TEXT NOT NULL,
-			state      TEXT DEFAULT '{}',
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
+			id                TEXT PRIMARY KEY,
+			agent_id          TEXT NOT NULL,
+			user_id           TEXT DEFAULT '',
+			parent_session_id TEXT DEFAULT '',
+			state             TEXT DEFAULT '{}',
+			created_at        INTEGER NOT NULL,
+			updated_at        INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS session_messages (
 			id         TEXT PRIMARY KEY,
@@ -96,6 +98,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			key   TEXT PRIMARY KEY,
 			value BLOB NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS mcp_servers (
+			id         TEXT PRIMARY KEY,
+			agent_id   TEXT NOT NULL,
+			name       TEXT NOT NULL UNIQUE,
+			url        TEXT NOT NULL,
+			transport  TEXT DEFAULT 'http',
+			headers    TEXT DEFAULT '{}',
+			enabled    INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL
+		)`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
@@ -110,6 +122,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE tools ADD COLUMN headers TEXT DEFAULT '{}'`,
 		`ALTER TABLE tools ADD COLUMN input_mapping TEXT DEFAULT '{}'`,
 		`ALTER TABLE tools ADD COLUMN script_path TEXT DEFAULT ''`,
+		`ALTER TABLE tools ADD COLUMN response_field TEXT DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT ''`,
+		`ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'http'`,
 	}
 	for _, a := range alters {
 		// SQLite ALTER TABLE ADD COLUMN fails if the column already exists.
@@ -122,14 +138,14 @@ func (s *Store) migrate(ctx context.Context) error {
 
 // --- Sessions ---
 
-func (s *Store) CreateSession(ctx context.Context, agentID string) (*metadata.Session, error) {
+func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().UnixMilli()
 	id := fmt.Sprintf("%d", now)
 	state := "{}"
 
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (id, agent_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-		id, agentID, state, now, now,
+		"INSERT INTO sessions (id, agent_id, user_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		id, agentID, userID, state, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: create session: %w", err)
@@ -138,6 +154,7 @@ func (s *Store) CreateSession(ctx context.Context, agentID string) (*metadata.Se
 	return &metadata.Session{
 		ID:        id,
 		AgentID:   agentID,
+		UserID:    userID,
 		Messages:  []metadata.Message{},
 		State:     map[string]any{},
 		CreatedAt: now,
@@ -150,9 +167,9 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 	var stateJSON string
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, state, created_at, updated_at FROM sessions WHERE id = ?",
+		"SELECT id, agent_id, user_id, parent_session_id, state, created_at, updated_at FROM sessions WHERE id = ?",
 		id,
-	).Scan(&sess.ID, &sess.AgentID, &stateJSON, &sess.CreatedAt, &sess.UpdatedAt)
+	).Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &stateJSON, &sess.CreatedAt, &sess.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -189,8 +206,8 @@ func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		"UPDATE sessions SET agent_id = ?, state = ?, updated_at = ? WHERE id = ?",
-		sess.AgentID, string(stateJSON), now, sess.ID,
+		"UPDATE sessions SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?, updated_at = ? WHERE id = ?",
+		sess.AgentID, sess.UserID, sess.ParentSessionID, string(stateJSON), now, sess.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: update session: %w", err)
@@ -226,7 +243,7 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 
 func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC",
+		"SELECT id, agent_id, user_id, parent_session_id, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC",
 		agentID,
 	)
 	if err != nil {
@@ -237,7 +254,32 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 	var sessions []*metadata.Session
 	for rows.Next() {
 		var sess metadata.Session
-		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("sqlite: scan session: %w", err)
+		}
+		sess.Messages = []metadata.Message{}
+		sessions = append(sessions, &sess)
+	}
+	if sessions == nil {
+		sessions = []*metadata.Session{}
+	}
+	return sessions, nil
+}
+
+func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, agent_id, user_id, parent_session_id, created_at, updated_at FROM sessions WHERE agent_id = ? AND user_id = ? ORDER BY updated_at DESC",
+		agentID, userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list sessions by user: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []*metadata.Session
+	for rows.Next() {
+		var sess metadata.Session
+		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("sqlite: scan session: %w", err)
 		}
 		sess.Messages = []metadata.Message{}
@@ -301,19 +343,20 @@ func (s *Store) SaveTool(ctx context.Context, td *metadata.ToolDef) error {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO tools (id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, script_path, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO tools (id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, response_field, script_path, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
-		   agent_id      = excluded.agent_id,
-		   description   = excluded.description,
-		   parameters    = excluded.parameters,
-		   handler       = excluded.handler,
-		   endpoint      = excluded.endpoint,
-		   headers       = excluded.headers,
-		   input_mapping = excluded.input_mapping,
-		   script_path   = excluded.script_path`,
+		   agent_id       = excluded.agent_id,
+		   description    = excluded.description,
+		   parameters     = excluded.parameters,
+		   handler        = excluded.handler,
+		   endpoint       = excluded.endpoint,
+		   headers        = excluded.headers,
+		   input_mapping  = excluded.input_mapping,
+		   response_field = excluded.response_field,
+		   script_path    = excluded.script_path`,
 		td.ID, td.AgentID, td.Name, td.Description, string(paramsJSON),
-		td.Handler, td.Endpoint, string(headersJSON), string(mappingJSON), td.ScriptPath, td.CreatedAt,
+		td.Handler, td.Endpoint, string(headersJSON), string(mappingJSON), td.ResponseField, td.ScriptPath, td.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: save tool %q: %w", td.Name, err)
@@ -326,9 +369,9 @@ func (s *Store) GetTool(ctx context.Context, name string) (*metadata.ToolDef, er
 	var paramsJSON, headersJSON, mappingJSON string
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, script_path, created_at FROM tools WHERE name = ?",
+		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, response_field, script_path, created_at FROM tools WHERE name = ?",
 		name,
-	).Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ScriptPath, &td.CreatedAt)
+	).Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ResponseField, &td.ScriptPath, &td.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -350,7 +393,7 @@ func (s *Store) GetTool(ctx context.Context, name string) (*metadata.ToolDef, er
 
 func (s *Store) ListTools(ctx context.Context, agentID string) ([]*metadata.ToolDef, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, script_path, created_at FROM tools WHERE agent_id = ?",
+		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, response_field, script_path, created_at FROM tools WHERE agent_id = ?",
 		agentID,
 	)
 	if err != nil {
@@ -362,7 +405,7 @@ func (s *Store) ListTools(ctx context.Context, agentID string) ([]*metadata.Tool
 	for rows.Next() {
 		var td metadata.ToolDef
 		var paramsJSON, headersJSON, mappingJSON string
-		if err := rows.Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ScriptPath, &td.CreatedAt); err != nil {
+		if err := rows.Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ResponseField, &td.ScriptPath, &td.CreatedAt); err != nil {
 			return nil, fmt.Errorf("sqlite: scan tool: %w", err)
 		}
 		_ = json.Unmarshal([]byte(paramsJSON), &td.Parameters)
@@ -482,44 +525,48 @@ func (s *Store) DeleteSkill(ctx context.Context, name string) error {
 	return nil
 }
 
-// --- Memory ---
+// --- Scoped Memory ---
 
-func (s *Store) Set(ctx context.Context, key string, value []byte) error {
+func (s *Store) SetMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string, value []byte) error {
+	compositeKey := metadata.ScopedKey(scope, scopeID, key)
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO memory (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-		key, value,
+		compositeKey, value,
 	)
 	if err != nil {
-		return fmt.Errorf("sqlite: set %q: %w", key, err)
+		return fmt.Errorf("sqlite: set memory %q: %w", compositeKey, err)
 	}
 	return nil
 }
 
-func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *Store) GetMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string) ([]byte, error) {
+	compositeKey := metadata.ScopedKey(scope, scopeID, key)
 	var value []byte
-	err := s.db.QueryRowContext(ctx, "SELECT value FROM memory WHERE key = ?", key).Scan(&value)
+	err := s.db.QueryRowContext(ctx, "SELECT value FROM memory WHERE key = ?", compositeKey).Scan(&value)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: get %q: %w", key, err)
+		return nil, fmt.Errorf("sqlite: get memory %q: %w", compositeKey, err)
 	}
 	return value, nil
 }
 
-func (s *Store) Delete(ctx context.Context, key string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM memory WHERE key = ?", key)
+func (s *Store) DeleteMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string) error {
+	compositeKey := metadata.ScopedKey(scope, scopeID, key)
+	_, err := s.db.ExecContext(ctx, "DELETE FROM memory WHERE key = ?", compositeKey)
 	if err != nil {
-		return fmt.Errorf("sqlite: delete %q: %w", key, err)
+		return fmt.Errorf("sqlite: delete memory %q: %w", compositeKey, err)
 	}
 	return nil
 }
 
-func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
-	pattern := prefix + "%"
+func (s *Store) ListMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, prefix string) ([]string, error) {
+	compositePrefix := metadata.ScopedKey(scope, scopeID, prefix)
+	pattern := compositePrefix + "%"
 	rows, err := s.db.QueryContext(ctx, "SELECT key FROM memory WHERE key LIKE ?", pattern)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: list %q: %w", prefix, err)
+		return nil, fmt.Errorf("sqlite: list memory %q: %w", compositePrefix, err)
 	}
 	defer rows.Close()
 
@@ -537,3 +584,126 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// --- Legacy flat KV (delegates to global-scoped memory) ---
+
+func (s *Store) Set(ctx context.Context, key string, value []byte) error {
+	return s.SetMemory(ctx, metadata.ScopeGlobal, "", key, value)
+}
+
+func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+	return s.GetMemory(ctx, metadata.ScopeGlobal, "", key)
+}
+
+func (s *Store) Delete(ctx context.Context, key string) error {
+	return s.DeleteMemory(ctx, metadata.ScopeGlobal, "", key)
+}
+
+func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.ListMemory(ctx, metadata.ScopeGlobal, "", prefix)
+}
+
+// --- MCP Servers ---
+
+func (s *Store) SaveMCPServer(ctx context.Context, srv *metadata.MCPServerDef) error {
+	if srv.ID == "" {
+		srv.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
+	}
+	if srv.CreatedAt == 0 {
+		srv.CreatedAt = time.Now().UnixMilli()
+	}
+	if srv.Transport == "" {
+		srv.Transport = "http"
+	}
+
+	headersJSON, err := json.Marshal(srv.Headers)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal headers: %w", err)
+	}
+
+	enabled := 0
+	if srv.Enabled {
+		enabled = 1
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO mcp_servers (id, agent_id, name, url, transport, headers, enabled, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   agent_id   = excluded.agent_id,
+		   url        = excluded.url,
+		   transport  = excluded.transport,
+		   headers    = excluded.headers,
+		   enabled    = excluded.enabled`,
+		srv.ID, srv.AgentID, srv.Name, srv.URL, srv.Transport, string(headersJSON), enabled, srv.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: save mcp server %q: %w", srv.Name, err)
+	}
+	return nil
+}
+
+func (s *Store) GetMCPServer(ctx context.Context, name string) (*metadata.MCPServerDef, error) {
+	var srv metadata.MCPServerDef
+	var headersJSON string
+	var enabled int
+
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, agent_id, name, url, transport, headers, enabled, created_at FROM mcp_servers WHERE name = ?",
+		name,
+	).Scan(&srv.ID, &srv.AgentID, &srv.Name, &srv.URL, &srv.Transport, &headersJSON, &enabled, &srv.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get mcp server %q: %w", name, err)
+	}
+
+	srv.Enabled = enabled == 1
+	_ = json.Unmarshal([]byte(headersJSON), &srv.Headers)
+	if srv.Headers == nil {
+		srv.Headers = map[string]string{}
+	}
+	if srv.Transport == "" {
+		srv.Transport = "http"
+	}
+	return &srv, nil
+}
+
+func (s *Store) ListMCPServers(ctx context.Context, agentID string) ([]*metadata.MCPServerDef, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, agent_id, name, url, transport, headers, enabled, created_at FROM mcp_servers WHERE agent_id = ?",
+		agentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list mcp servers: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []*metadata.MCPServerDef
+	for rows.Next() {
+		var srv metadata.MCPServerDef
+		var headersJSON string
+		var enabled int
+		if err := rows.Scan(&srv.ID, &srv.AgentID, &srv.Name, &srv.URL, &srv.Transport, &headersJSON, &enabled, &srv.CreatedAt); err != nil {
+			return nil, fmt.Errorf("sqlite: scan mcp server: %w", err)
+		}
+		srv.Enabled = enabled == 1
+		_ = json.Unmarshal([]byte(headersJSON), &srv.Headers)
+		if srv.Headers == nil {
+			srv.Headers = map[string]string{}
+		}
+		if srv.Transport == "" {
+			srv.Transport = "http"
+		}
+		servers = append(servers, &srv)
+	}
+	return servers, nil
+}
+
+func (s *Store) DeleteMCPServer(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM mcp_servers WHERE name = ?", name)
+	if err != nil {
+		return fmt.Errorf("sqlite: delete mcp server %q: %w", name, err)
+	}
+	return nil
+}

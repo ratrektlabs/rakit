@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	sessionsCol = "sessions"
-	messagesCol = "messages"
-	toolsCol    = "tools"
-	skillsCol   = "skills"
-	memoryCol   = "memory"
+	sessionsCol   = "sessions"
+	messagesCol   = "messages"
+	toolsCol      = "tools"
+	skillsCol     = "skills"
+	memoryCol     = "memory"
+	mcpServersCol = "mcp_servers"
 )
 
 // Store implements metadata.Store backed by Google Cloud Firestore.
@@ -42,12 +43,13 @@ func (s *Store) Close() error {
 // Sessions
 // ---------------------------------------------------------------------------
 
-// CreateSession creates a new session for the given agentID and returns it.
-func (s *Store) CreateSession(ctx context.Context, agentID string) (*metadata.Session, error) {
+// CreateSession creates a new session for the given agentID and userID and returns it.
+func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().Unix()
 	session := &metadata.Session{
 		ID:        "",
 		AgentID:   agentID,
+		UserID:    userID,
 		Messages:  []metadata.Message{},
 		State:     map[string]any{},
 		CreatedAt: now,
@@ -157,14 +159,55 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 		}
 		data := doc.Data()
 		agentID, _ := data["agentID"].(string)
+		userID, _ := data["userID"].(string)
+		parentSessionID, _ := data["parentSessionID"].(string)
 		createdAt, _ := data["createdAt"].(int64)
 		updatedAt, _ := data["updatedAt"].(int64)
 		sess := &metadata.Session{
-			ID:        doc.Ref.ID,
-			AgentID:   agentID,
-			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
-			Messages:  []metadata.Message{},
+			ID:              doc.Ref.ID,
+			AgentID:         agentID,
+			UserID:          userID,
+			ParentSessionID: parentSessionID,
+			CreatedAt:       createdAt,
+			UpdatedAt:       updatedAt,
+			Messages:        []metadata.Message{},
+		}
+		sessions = append(sessions, sess)
+	}
+	if sessions == nil {
+		sessions = []*metadata.Session{}
+	}
+	return sessions, nil
+}
+
+// ListSessionsByUser returns sessions for the given agentID and userID.
+func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
+	iter := s.client.Collection(sessionsCol).
+		Where("agentID", "==", agentID).
+		Where("userID", "==", userID).
+		Documents(ctx)
+	defer iter.Stop()
+
+	var sessions []*metadata.Session
+	for {
+		doc, err := iter.Next()
+		if err != nil {
+			break
+		}
+		data := doc.Data()
+		aid, _ := data["agentID"].(string)
+		uid, _ := data["userID"].(string)
+		parentSessionID, _ := data["parentSessionID"].(string)
+		createdAt, _ := data["createdAt"].(int64)
+		updatedAt, _ := data["updatedAt"].(int64)
+		sess := &metadata.Session{
+			ID:              doc.Ref.ID,
+			AgentID:         aid,
+			UserID:          uid,
+			ParentSessionID: parentSessionID,
+			CreatedAt:       createdAt,
+			UpdatedAt:       updatedAt,
+			Messages:        []metadata.Message{},
 		}
 		sessions = append(sessions, sess)
 	}
@@ -339,35 +382,37 @@ func (s *Store) DeleteSkill(ctx context.Context, name string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Memory (key-value)
+// Scoped Memory
 // ---------------------------------------------------------------------------
 
-// Set stores a key-value pair in the memory collection.
-func (s *Store) Set(ctx context.Context, key string, value []byte) error {
-	if key == "" {
-		return fmt.Errorf("firestore: set: empty key")
+// SetMemory stores a scoped key-value pair in the memory collection.
+func (s *Store) SetMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string, value []byte) error {
+	docID := metadata.ScopedKey(scope, scopeID, key)
+	if docID == "" {
+		return fmt.Errorf("firestore: set memory: empty key")
 	}
-	ref := s.client.Collection(memoryCol).Doc(key)
+	ref := s.client.Collection(memoryCol).Doc(docID)
 	_, err := ref.Set(ctx, map[string]any{
-		"key":   key,
+		"key":   docID,
 		"value": value,
 	})
 	if err != nil {
-		return fmt.Errorf("firestore: set %s: %w", key, err)
+		return fmt.Errorf("firestore: set memory %s: %w", docID, err)
 	}
 	return nil
 }
 
-// Get retrieves the value for a key from the memory collection.
-func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
-	doc, err := s.client.Collection(memoryCol).Doc(key).Get(ctx)
+// GetMemory retrieves a scoped value from the memory collection.
+func (s *Store) GetMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string) ([]byte, error) {
+	docID := metadata.ScopedKey(scope, scopeID, key)
+	doc, err := s.client.Collection(memoryCol).Doc(docID).Get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("firestore: get %s: %w", key, err)
+		return nil, fmt.Errorf("firestore: get memory %s: %w", docID, err)
 	}
 
 	raw, err := doc.DataAt("value")
 	if err != nil {
-		return nil, fmt.Errorf("firestore: get value for %s: %w", key, err)
+		return nil, fmt.Errorf("firestore: get memory value for %s: %w", docID, err)
 	}
 
 	switch v := raw.(type) {
@@ -376,27 +421,29 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 	case string:
 		return []byte(v), nil
 	default:
-		return nil, fmt.Errorf("firestore: unexpected value type for key %s: %T", key, raw)
+		return nil, fmt.Errorf("firestore: unexpected value type for key %s: %T", docID, raw)
 	}
 }
 
-// Delete removes a key from the memory collection.
-func (s *Store) Delete(ctx context.Context, key string) error {
-	_, err := s.client.Collection(memoryCol).Doc(key).Delete(ctx)
+// DeleteMemory removes a scoped key from the memory collection.
+func (s *Store) DeleteMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, key string) error {
+	docID := metadata.ScopedKey(scope, scopeID, key)
+	_, err := s.client.Collection(memoryCol).Doc(docID).Delete(ctx)
 	if err != nil {
-		return fmt.Errorf("firestore: delete %s: %w", key, err)
+		return fmt.Errorf("firestore: delete memory %s: %w", docID, err)
 	}
 	return nil
 }
 
-// List returns all keys with the given prefix from the memory collection.
-func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
+// ListMemory returns all keys matching the scoped prefix from the memory collection.
+func (s *Store) ListMemory(ctx context.Context, scope metadata.MemoryScope, scopeID, prefix string) ([]string, error) {
+	scopedPrefix := metadata.ScopedKey(scope, scopeID, prefix)
+
 	var iter *firestore.DocumentIterator
-	if prefix != "" {
-		// Use a range query: keys >= prefix and < prefix with last rune incremented.
-		nextPrefix := prefixIncrement(prefix)
+	if scopedPrefix != "" {
+		nextPrefix := prefixIncrement(scopedPrefix)
 		iter = s.client.Collection(memoryCol).
-			Where("key", ">=", prefix).
+			Where("key", ">=", scopedPrefix).
 			Where("key", "<", nextPrefix).
 			Documents(ctx)
 	} else {
@@ -411,7 +458,7 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("firestore: list prefix %q: %w", prefix, err)
+			return nil, fmt.Errorf("firestore: list memory prefix %q: %w", scopedPrefix, err)
 		}
 		key, _ := doc.DataAt("key")
 		if s, ok := key.(string); ok {
@@ -419,6 +466,30 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+// ---------------------------------------------------------------------------
+// Legacy flat KV (delegates to global-scoped memory)
+// ---------------------------------------------------------------------------
+
+// Set stores a key-value pair using global scope.
+func (s *Store) Set(ctx context.Context, key string, value []byte) error {
+	return s.SetMemory(ctx, metadata.ScopeGlobal, "", key, value)
+}
+
+// Get retrieves a value by key using global scope.
+func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+	return s.GetMemory(ctx, metadata.ScopeGlobal, "", key)
+}
+
+// Delete removes a key using global scope.
+func (s *Store) Delete(ctx context.Context, key string) error {
+	return s.DeleteMemory(ctx, metadata.ScopeGlobal, "", key)
+}
+
+// List returns all keys with the given prefix using global scope.
+func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.ListMemory(ctx, metadata.ScopeGlobal, "", prefix)
 }
 
 // ---------------------------------------------------------------------------
@@ -487,11 +558,13 @@ func prefixIncrement(prefix string) string {
 // Messages are stored in a subcollection, not inline.
 func toSessionMap(sess *metadata.Session) map[string]any {
 	return map[string]any{
-		"id":        sess.ID,
-		"agentID":   sess.AgentID,
-		"state":     sess.State,
-		"createdAt": sess.CreatedAt,
-		"updatedAt": sess.UpdatedAt,
+		"id":              sess.ID,
+		"agentID":         sess.AgentID,
+		"userID":          sess.UserID,
+		"parentSessionID": sess.ParentSessionID,
+		"state":           sess.State,
+		"createdAt":       sess.CreatedAt,
+		"updatedAt":       sess.UpdatedAt,
 	}
 }
 
@@ -550,3 +623,66 @@ func isNotFound(err error) bool {
 
 // Verify interface compliance at compile time.
 var _ metadata.Store = (*Store)(nil)
+
+// ---------------------------------------------------------------------------
+// MCP Servers
+// ---------------------------------------------------------------------------
+
+func (s *Store) SaveMCPServer(ctx context.Context, srv *metadata.MCPServerDef) error {
+	if srv.Name == "" {
+		return fmt.Errorf("firestore: save mcp server: name is required")
+	}
+	ref := s.client.Collection(mcpServersCol).Doc(srv.Name)
+	_, err := ref.Set(ctx, srv)
+	if err != nil {
+		return fmt.Errorf("firestore: save mcp server %s: %w", srv.Name, err)
+	}
+	return nil
+}
+
+func (s *Store) GetMCPServer(ctx context.Context, name string) (*metadata.MCPServerDef, error) {
+	doc, err := s.client.Collection(mcpServersCol).Doc(name).Get(ctx)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("firestore: get mcp server %s: %w", name, err)
+	}
+	var srv metadata.MCPServerDef
+	if err := doc.DataTo(&srv); err != nil {
+		return nil, fmt.Errorf("firestore: decode mcp server %s: %w", name, err)
+	}
+	return &srv, nil
+}
+
+func (s *Store) ListMCPServers(ctx context.Context, agentID string) ([]*metadata.MCPServerDef, error) {
+	iter := s.client.Collection(mcpServersCol).
+		Where("AgentID", "==", agentID).
+		Documents(ctx)
+	defer iter.Stop()
+
+	var servers []*metadata.MCPServerDef
+	for {
+		doc, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("firestore: list mcp servers: %w", err)
+		}
+		var srv metadata.MCPServerDef
+		if err := doc.DataTo(&srv); err != nil {
+			return nil, fmt.Errorf("firestore: decode mcp server: %w", err)
+		}
+		servers = append(servers, &srv)
+	}
+	return servers, nil
+}
+
+func (s *Store) DeleteMCPServer(ctx context.Context, name string) error {
+	_, err := s.client.Collection(mcpServersCol).Doc(name).Delete(ctx)
+	if err != nil {
+		return fmt.Errorf("firestore: delete mcp server %s: %w", name, err)
+	}
+	return nil
+}

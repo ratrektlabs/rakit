@@ -11,9 +11,10 @@ type Message struct {
 
 // ToolCall represents an LLM tool call.
 type ToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
+	ID              string
+	Name            string
+	Arguments       string
+	ThoughtSignature []byte // Provider-specific opaque data to include when echoing back
 }
 
 // Provider is the interface for LLM backends.
@@ -31,6 +32,7 @@ type Request struct {
 	Model       string
 	Messages    []Message
 	Tools       []Tool
+	System      string // system prompt / instructions
 	MaxTokens   int
 	Temperature float64
 }
@@ -77,9 +79,10 @@ type TextDeltaEvent struct {
 func (e *TextDeltaEvent) Type() EventType { return EventTextDelta }
 
 type ToolCallEvent struct {
-	ID        string
-	Name      string
-	Arguments string
+	ID              string
+	Name            string
+	Arguments       string
+	ThoughtSignature []byte // Provider-specific opaque data to include when echoing back
 }
 
 func (e *ToolCallEvent) Type() EventType { return EventToolCall }

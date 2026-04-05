@@ -94,6 +94,12 @@ func main() {
 		prov = p
 	}
 
+	// Protocol registry
+	reg := protocol.NewRegistry()
+	reg.Register(aisdk.New())
+	reg.Register(agui.New())
+	reg.SetDefault(aisdk.New())
+
 	// Agent
 	a := agent.New(
 		agent.WithProvider(prov),
@@ -102,7 +108,10 @@ func main() {
 		agent.WithFS(blobStore),
 	)
 
-	// Register a skill
+	// Register the spawn_agent tool so the LLM can delegate subtasks
+	a.Tools.Register(a.SpawnAgentTool(reg.Default()))
+
+	// Register a demo skill
 	_ = a.Skills.Register(ctx, &skill.Definition{
 		Name:         "echo",
 		Description:  "Echoes back the input",
@@ -117,16 +126,11 @@ func main() {
 				},
 				"required": []string{"text"},
 			},
-			Handler:  "http",
-			Endpoint: "https://httpbin.org/post",
+			Handler:       "http",
+			Endpoint:      "https://httpbin.org/post",
+			ResponseField: "json",
 		}},
 	})
-
-	// Protocol registry
-	reg := protocol.NewRegistry()
-	reg.Register(aisdk.New())
-	reg.Register(agui.New())
-	reg.SetDefault(aisdk.New())
 
 	// HTTP handler
 	mux := http.NewServeMux()
@@ -147,15 +151,21 @@ func main() {
 		var req struct {
 			Message   string `json:"message"`
 			SessionID string `json:"sessionId"`
+			UserID    string `json:"userId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 
+		// Default user
+		if req.UserID == "" {
+			req.UserID = "default"
+		}
+
 		// Create session if not provided
 		if req.SessionID == "" {
-			sess, err := a.CreateSession(r.Context())
+			sess, err := a.CreateSessionForUser(r.Context(), req.UserID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

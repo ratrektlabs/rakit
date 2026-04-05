@@ -1,0 +1,1421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rakit — Agent Dashboard</title>
+<style>
+:root {
+  --bg: #0a0a0f;
+  --bg-card: #12121a;
+  --bg-hover: #1a1a26;
+  --bg-input: #0e0e16;
+  --border: #1e1e2e;
+  --border-focus: #5b5bd6;
+  --text: #e4e4ef;
+  --text-dim: #8888a0;
+  --text-muted: #5c5c72;
+  --accent: #5b5bd6;
+  --accent-hover: #6e6edf;
+  --success: #2ea043;
+  --danger: #da3633;
+  --warning: #d29922;
+  --tool-bg: #0d1520;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 260px;
+  min-width: 260px;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.sidebar-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sidebar-header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+.sidebar-header .logo {
+  width: 28px; height: 28px;
+  background: var(--accent);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px; color: #fff;
+}
+.sidebar-nav { flex: 1; overflow-y: auto; padding: 8px; }
+.nav-section { margin-bottom: 4px; }
+.nav-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  padding: 12px 12px 6px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+  transition: all 0.15s;
+}
+.nav-item:hover { background: var(--bg-hover); color: var(--text); }
+.nav-item.active { background: var(--accent); color: #fff; }
+.nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-item .badge {
+  margin-left: auto;
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Session list */
+.session-list { padding: 8px; border-top: 1px solid var(--border); overflow-y: auto; max-height: 300px; }
+.session-item {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  transition: all 0.15s;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.session-item:hover { background: var(--bg-hover); color: var(--text); }
+.session-item.active { background: var(--bg-hover); color: var(--text); border-left: 2px solid var(--accent); }
+.session-item .meta { font-size: 10px; color: var(--text-muted); }
+
+.new-session-btn {
+  margin: 8px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+}
+.new-session-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Main content */
+.main { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* Chat panel */
+.chat-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.chat-header {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-card);
+}
+.chat-header h2 { font-size: 14px; font-weight: 500; }
+.chat-header .status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-dim);
+}
+.chat-header .status .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--success);
+}
+.chat-header .status .dot.off { background: var(--danger); }
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.message {
+  max-width: 85%;
+  padding: 12px 16px;
+  border-radius: var(--radius-lg);
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.message.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.message.assistant {
+  align-self: flex-start;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+.message.system {
+  align-self: center;
+  background: var(--tool-bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 90%;
+}
+.message .tool-calls {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+.message .tool-call-item {
+  background: var(--tool-bg);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.message .tool-call-item .tc-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.message .tool-call-item .tc-section {
+  margin-top: 8px;
+}
+.message .tool-call-item .tc-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.message .tool-call-item .tc-label.req { color: var(--accent); }
+.message .tool-call-item .tc-label.res { color: var(--success); }
+.message .tool-call-item .tc-label.err { color: var(--danger); }
+.message .tool-call-item .tc-body {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 6px 10px;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+}
+/* Markdown in messages */
+.message p { margin: 0.4em 0; }
+.message p:first-child { margin-top: 0; }
+.message p:last-child { margin-bottom: 0; }
+.message code {
+  background: rgba(255,255,255,0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+.message pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.message pre code {
+  background: none;
+  padding: 0;
+}
+.message ul, .message ol { padding-left: 1.5em; margin: 0.4em 0; }
+.message li { margin: 0.2em 0; }
+.message blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  margin: 0.4em 0;
+  color: var(--text-dim);
+}
+.message h1, .message h2, .message h3 { margin: 0.6em 0 0.3em; }
+.message h1 { font-size: 1.3em; }
+.message h2 { font-size: 1.15em; }
+.message h3 { font-size: 1.05em; }
+.message a { color: var(--accent); text-decoration: none; }
+.message a:hover { text-decoration: underline; }
+.message hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.message .role-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.chat-input-area {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.chat-input-wrapper {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.chat-input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 16px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  resize: none;
+  outline: none;
+  min-height: 44px;
+  max-height: 200px;
+  transition: border-color 0.15s;
+}
+.chat-input:focus { border-color: var(--border-focus); }
+.chat-input::placeholder { color: var(--text-muted); }
+.send-btn {
+  width: 44px; height: 44px;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.send-btn:hover { background: var(--accent-hover); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Admin panels */
+.admin-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: none;
+}
+.admin-panel.active { display: block; }
+.admin-panel h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  letter-spacing: -0.3px;
+}
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.card h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.item-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: border-color 0.15s;
+}
+.item-card:hover { border-color: var(--text-muted); }
+.item-card .name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.item-card .desc { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+.item-card .meta-row {
+  display: flex; gap: 8px; align-items: center;
+  font-size: 11px; color: var(--text-muted);
+}
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.tag.enabled { background: rgba(46,160,67,0.15); color: var(--success); }
+.tag.disabled { background: rgba(218,54,51,0.15); color: var(--danger); }
+.tag.http { background: rgba(91,91,214,0.15); color: var(--accent); }
+.tag.script { background: rgba(210,153,34,0.15); color: var(--warning); }
+.tag.sse { background: rgba(210,153,34,0.15); color: var(--warning); }
+
+/* Form elements */
+.form-group { margin-bottom: 16px; }
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.form-input, .form-select, .form-textarea {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--border-focus); }
+.form-textarea { min-height: 80px; resize: vertical; }
+.form-select { cursor: pointer; }
+.form-row { display: flex; gap: 12px; }
+.form-row > * { flex: 1; }
+
+.btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn:hover { background: var(--bg-hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: rgba(218,54,51,0.1); }
+.btn.sm { padding: 4px 10px; font-size: 12px; }
+.btn-row { display: flex; gap: 8px; margin-top: 12px; }
+
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Provider status bar */
+.provider-bar {
+  padding: 8px 24px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.provider-bar .chip {
+  background: var(--bg);
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .sidebar { width: 60px; min-width: 60px; }
+  .sidebar-header h1, .nav-item span:not(.icon), .nav-section-title, .session-list, .new-session-btn { display: none; }
+  .nav-item { justify-content: center; padding: 10px; }
+  .nav-item .icon { margin: 0; }
+}
+
+/* Loading spinner */
+.spinner {
+  display: inline-block;
+  width: 16px; height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Memory table */
+.memory-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.memory-table th {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 12px;
+}
+.memory-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.memory-table tr:hover td { background: var(--bg-hover); }
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 20px;
+  font-size: 13px;
+  z-index: 1000;
+  animation: slideUp 0.3s ease;
+}
+@keyframes slideUp { from { transform: translateY(20px); opacity: 0; } }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">R</div>
+    <h1>rakit</h1>
+  </div>
+  <div class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-title">Agent</div>
+      <div class="nav-item active" data-panel="chat" onclick="showPanel('chat', this)">
+        <span class="icon">&#x2B24;</span><span>Chat</span>
+      </div>
+      <div class="nav-item" data-panel="provider" onclick="showPanel('provider', this)">
+        <span class="icon">&#x26A1;</span><span>Provider</span>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-title">Capabilities</div>
+      <div class="nav-item" data-panel="skills" onclick="showPanel('skills', this)">
+        <span class="icon">&#x2726;</span><span>Skills</span>
+        <span class="badge" id="skills-count">0</span>
+      </div>
+      <div class="nav-item" data-panel="tools" onclick="showPanel('tools', this)">
+        <span class="icon">&#x2692;</span><span>Tools</span>
+        <span class="badge" id="tools-count">0</span>
+      </div>
+      <div class="nav-item" data-panel="mcp" onclick="showPanel('mcp', this)">
+        <span class="icon">&#x2B21;</span><span>MCP</span>
+        <span class="badge" id="mcp-count">0</span>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-title">Storage</div>
+      <div class="nav-item" data-panel="memory" onclick="showPanel('memory', this)">
+        <span class="icon">&#x2B50;</span><span>Memory</span>
+      </div>
+      <div class="nav-item" data-panel="workspace" onclick="showPanel('workspace', this)">
+        <span class="icon">&#x1F4C1;</span><span>Workspace</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="new-session-btn" onclick="createSession()">+ New Session</div>
+  <div class="session-list" id="session-list"></div>
+</div>
+
+<div class="main">
+  <!-- Provider bar -->
+  <div class="provider-bar" id="provider-bar">
+    <span>Provider:</span>
+    <span class="chip" id="provider-chip">Not configured</span>
+    <span style="margin-left:12px">Protocol:</span>
+    <select id="protocol-select" class="chip" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:20px;padding:2px 10px;font-size:11px;font-family:var(--font);cursor:pointer;outline:none">
+      <option value="ai-sdk">AI SDK</option>
+      <option value="ag-ui">AG-UI</option>
+    </select>
+    <span style="margin-left:auto">Session:</span>
+    <span class="chip" id="session-chip">None</span>
+  </div>
+
+  <!-- Chat panel -->
+  <div class="chat-panel" id="panel-chat">
+    <div class="chat-messages" id="chat-messages">
+      <div class="empty-state">Start a conversation or select a session from the sidebar.</div>
+    </div>
+    <div class="chat-input-area">
+      <div class="chat-input-wrapper">
+        <textarea class="chat-input" id="chat-input" placeholder="Send a message..." rows="1"
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendMessage()">&#x27A4;</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Provider panel -->
+  <div class="admin-panel" id="panel-provider">
+    <h2>Provider Settings</h2>
+    <div class="card">
+      <h3>Configure LLM Provider</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Provider</label>
+          <select class="form-select" id="prov-select">
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Gemini</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Model</label>
+          <input class="form-input" id="prov-model" placeholder="e.g. gpt-5.4">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input class="form-input" id="prov-key" type="password" placeholder="sk-... or AIza...">
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" onclick="saveProvider()">Save Provider</button>
+      </div>
+      <div id="prov-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
+    </div>
+  </div>
+
+  <!-- Skills panel -->
+  <div class="admin-panel" id="panel-skills">
+    <h2>Skills</h2>
+    <div class="card">
+      <h3>Register New Skill</h3>
+      <div class="form-row">
+        <div class="form-group"><label>Name</label><input class="form-input" id="skill-name"></div>
+        <div class="form-group"><label>Description</label><input class="form-input" id="skill-desc"></div>
+      </div>
+      <div class="form-group"><label>Instructions</label><textarea class="form-textarea" id="skill-instructions"></textarea></div>
+      <div class="form-group"><label>Tools (JSON array)</label><textarea class="form-textarea" id="skill-tools" placeholder='[{"name":"my_tool","description":"...","parameters":{},"handler":"http","endpoint":"https://..."}]'></textarea></div>
+      <div class="btn-row"><button class="btn primary" onclick="registerSkill()">Register</button></div>
+    </div>
+    <div class="card-grid" id="skills-list"></div>
+  </div>
+
+  <!-- Tools panel -->
+  <div class="admin-panel" id="panel-tools">
+    <h2>Tools</h2>
+    <div class="card">
+      <h3>Register New Tool</h3>
+      <div class="form-row">
+        <div class="form-group"><label>Name</label><input class="form-input" id="tool-name"></div>
+        <div class="form-group"><label>Handler</label>
+          <select class="form-select" id="tool-handler"><option value="http">HTTP</option><option value="script">Script</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>Description</label><input class="form-input" id="tool-desc"></div>
+      <div class="form-group"><label>Endpoint / Script Path</label><input class="form-input" id="tool-endpoint"></div>
+      <div class="form-group"><label>Parameters (JSON)</label><textarea class="form-textarea" id="tool-params" placeholder='{"type":"object","properties":{}}'></textarea></div>
+      <div class="btn-row"><button class="btn primary" onclick="registerTool()">Register</button></div>
+    </div>
+    <div class="card-grid" id="tools-list"></div>
+  </div>
+
+  <!-- MCP panel -->
+  <div class="admin-panel" id="panel-mcp">
+    <h2>MCP Servers</h2>
+    <div class="card">
+      <h3>Add MCP Server</h3>
+      <div class="form-row">
+        <div class="form-group"><label>Name</label><input class="form-input" id="mcp-name"></div>
+        <div class="form-group"><label>Transport</label>
+          <select class="form-select" id="mcp-transport"><option value="http">HTTP (Streamable)</option><option value="sse">SSE</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>URL</label><input class="form-input" id="mcp-url" placeholder="https://mcp-server.example.com/mcp"></div>
+      <div class="btn-row"><button class="btn primary" onclick="addMCPServer()">Add Server</button></div>
+    </div>
+    <div class="card-grid" id="mcp-list"></div>
+  </div>
+
+  <!-- Memory panel -->
+  <div class="admin-panel" id="panel-memory">
+    <h2>Memory</h2>
+    <div class="card">
+      <h3>Set Memory</h3>
+      <div class="form-row">
+        <div class="form-group"><label>Scope</label>
+          <select class="form-select" id="mem-scope"><option value="global">Global</option><option value="agent">Agent</option><option value="user">User</option></select>
+        </div>
+        <div class="form-group"><label>Scope ID</label><input class="form-input" id="mem-scope-id" placeholder="(empty for global)"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Key</label><input class="form-input" id="mem-key"></div>
+        <div class="form-group"><label>Value</label><input class="form-input" id="mem-value"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" onclick="setMemory()">Set</button>
+        <button class="btn" onclick="loadMemory()">Refresh</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Stored Keys</h3>
+      <table class="memory-table" id="memory-table">
+        <thead><tr><th>Key</th><th>Actions</th></tr></thead>
+        <tbody id="memory-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Workspace panel -->
+  <div class="admin-panel" id="panel-workspace">
+    <h2>Workspace</h2>
+    <div class="card">
+      <h3>Upload File</h3>
+      <div class="form-row">
+        <div class="form-group"><label>File</label><input type="file" id="ws-file" class="form-input" style="padding:8px"></div>
+        <div class="form-group"><label>Path (optional)</label><input class="form-input" id="ws-path" placeholder="custom/path/file.txt"></div>
+      </div>
+      <div class="btn-row"><button class="btn primary" onclick="uploadFile()">Upload</button></div>
+    </div>
+    <div class="card">
+      <h3>Files</h3>
+      <div id="workspace-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let currentSession = null;
+let streaming = false;
+
+// --- Panel Navigation ---
+function showPanel(name, el) {
+  document.querySelectorAll('.admin-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
+  const chatPanel = document.getElementById('panel-chat');
+  if (name === 'chat') {
+    chatPanel.style.display = 'flex';
+  } else {
+    chatPanel.style.display = 'none';
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+
+  if (el) el.classList.add('active');
+
+  // Load data for panel
+  if (name === 'skills') loadSkills();
+  if (name === 'tools') loadTools();
+  if (name === 'mcp') loadMCP();
+  if (name === 'memory') loadMemory();
+  if (name === 'workspace') loadWorkspace();
+  if (name === 'provider') loadProvider();
+}
+
+// --- Toast ---
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+// --- Provider ---
+async function loadProvider() {
+  try {
+    const r = await fetch(API + '/api/v1/provider');
+    const d = await r.json();
+    const chip = document.getElementById('provider-chip');
+    if (d.configured) {
+      chip.textContent = d.provider + ' / ' + d.model;
+      document.getElementById('prov-select').value = d.provider;
+      document.getElementById('prov-model').value = d.model;
+    } else {
+      chip.textContent = 'Not configured';
+    }
+    const status = document.getElementById('prov-status');
+    if (d.saved) {
+      status.textContent = 'Saved: ' + d.saved.provider + '/' + d.saved.model + (d.saved.apiKeyMasked ? ' (' + d.saved.apiKeyMasked + ')' : '');
+    }
+  } catch(e) {}
+}
+
+async function saveProvider() {
+  const body = {
+    provider: document.getElementById('prov-select').value,
+    model: document.getElementById('prov-model').value,
+    apiKey: document.getElementById('prov-key').value
+  };
+  const r = await fetch(API + '/api/v1/provider', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (d.ok) {
+    toast('Provider saved');
+    document.getElementById('provider-chip').textContent = d.provider + ' / ' + d.model;
+    document.getElementById('prov-key').value = '';
+    loadProvider();
+  } else {
+    toast('Error: ' + (d.error || 'Unknown'));
+  }
+}
+
+// --- Sessions ---
+async function loadSessions() {
+  try {
+    const r = await fetch(API + '/api/v1/sessions');
+    const d = await r.json();
+    const list = document.getElementById('session-list');
+    list.innerHTML = '';
+    (d.sessions || []).forEach(s => {
+      const item = document.createElement('div');
+      item.className = 'session-item' + (currentSession === s.id ? ' active' : '');
+      item.innerHTML = '<span>#' + s.id.slice(-6) + '</span><span class="meta">' + s.messageCount + ' msgs</span>';
+      item.onclick = () => selectSession(s.id);
+      list.appendChild(item);
+    });
+  } catch(e) {}
+}
+
+async function createSession() {
+  const r = await fetch(API + '/api/v1/sessions', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({userId: 'default'})
+  });
+  const d = await r.json();
+  if (d.session) {
+    currentSession = d.session.id;
+    document.getElementById('session-chip').textContent = '#' + currentSession.slice(-6);
+    document.getElementById('chat-messages').innerHTML = '';
+    loadSessions();
+    // Switch to chat
+    showPanel('chat', document.querySelector('[data-panel="chat"]'));
+  }
+}
+
+async function selectSession(id) {
+  currentSession = id;
+  document.getElementById('session-chip').textContent = '#' + id.slice(-6);
+  loadSessions();
+
+  const r = await fetch(API + '/api/v1/sessions/' + id);
+  const d = await r.json();
+  const msgs = document.getElementById('chat-messages');
+  msgs.innerHTML = '';
+  if (d.session && d.session.messages) {
+    d.session.messages.forEach(m => {
+      appendMessage(m.role, m.content, m.toolCalls);
+    });
+  }
+  showPanel('chat', document.querySelector('[data-panel="chat"]'));
+}
+
+// --- Chat ---
+function appendMessage(role, content, toolCalls) {
+  if (!content && (!toolCalls || toolCalls.length === 0)) return;
+  const msgs = document.getElementById('chat-messages');
+  // Remove empty state
+  const empty = msgs.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const div = document.createElement('div');
+  div.className = 'message ' + role;
+
+  let html = '';
+  if (role !== 'user') {
+    html += '<div class="role-label">' + role + '</div>';
+  }
+  if (role === 'user') {
+    html += escapeHtml(content || '');
+  } else {
+    html += renderMarkdown(content || '');
+  }
+
+  if (toolCalls && toolCalls.length > 0) {
+    toolCalls.forEach(tc => {
+      html += renderToolCallHTML(tc.name || '', tc.arguments || '', tc.result, tc.status || 'completed');
+    });
+  }
+
+  div.innerHTML = html;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// Simple markdown renderer
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = escapeHtml(text);
+  // Code blocks (``` ... ```)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    '<pre><code>' + code.trim() + '</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // Blockquotes
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // Unordered lists
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  // Ordered lists
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // Horizontal rule
+  html = html.replace(/^---$/gm, '<hr>');
+  // Links
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  // Paragraphs: wrap remaining bare text blocks
+  html = html.replace(/\n\n/g, '</p><p>');
+  // Line breaks within paragraphs
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
+// Render a tool call block with labeled request/response
+function renderToolCallHTML(name, args, result, status) {
+  const icon = status === 'running' ? '<span class="spinner" style="width:14px;height:14px"></span>'
+    : status === 'error' || status === 'failed' ? '<span style="color:var(--danger)">&#10007;</span>'
+    : '<span style="color:var(--success)">&#10003;</span>';
+
+  let html = '<div class="tool-call-item">';
+  html += '<div class="tc-header">' + icon + ' ' + escapeHtml(name) + '</div>';
+
+  if (args) {
+    let prettyArgs = args;
+    try { prettyArgs = JSON.stringify(JSON.parse(args), null, 2); } catch(e) {}
+    html += '<div class="tc-section"><div class="tc-label req">Request</div>'
+      + '<div class="tc-body">' + escapeHtml(prettyArgs) + '</div></div>';
+  }
+
+  if (result !== null && result !== undefined) {
+    let prettyResult = typeof result === 'string' ? result : JSON.stringify(result);
+    try { prettyResult = JSON.stringify(JSON.parse(prettyResult), null, 2); } catch(e) {}
+    const labelClass = status === 'error' || status === 'failed' ? 'err' : 'res';
+    html += '<div class="tc-section"><div class="tc-label ' + labelClass + '">Response</div>'
+      + '<div class="tc-body">' + escapeHtml(prettyResult) + '</div></div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function getAcceptHeader() {
+  const proto = document.getElementById('protocol-select').value;
+  return proto === 'ag-ui' ? 'text/vnd.ag-ui' : 'text/vnd.ai-sdk';
+}
+
+// Parse an SSE "data:" line, handling both AI SDK and AG-UI formats
+function parseSSEEvent(line) {
+  if (!line.startsWith('data: ')) return null;
+  const payload = line.slice(6).trim();
+  if (payload === '[DONE]') return { kind: 'done' };
+  try {
+    const evt = JSON.parse(payload);
+    const t = evt.type;
+    // Text deltas
+    if (t === 'text-delta' || t === 'TEXT_MESSAGE_CONTENT')
+      return { kind: 'delta', text: evt.delta };
+    // Tool call start
+    if (t === 'tool-input-start' || t === 'TOOL_CALL_START')
+      return { kind: 'tool-start', id: evt.toolCallId, name: evt.toolName || evt.toolCallName || '' };
+    // Tool call args (streaming)
+    if (t === 'tool-input-delta' || t === 'TOOL_CALL_ARGS')
+      return { kind: 'tool-args', id: evt.toolCallId, delta: evt.delta };
+    // Tool call end
+    if (t === 'tool-input-end' || t === 'TOOL_CALL_END')
+      return { kind: 'tool-end', id: evt.toolCallId };
+    // Tool result
+    if (t === 'tool-output-available' || t === 'TOOL_CALL_RESULT')
+      return { kind: 'tool-result', id: evt.toolCallId, output: evt.output || evt.content || '' };
+    // Text message lifecycle
+    if (t === 'start' || t === 'TEXT_MESSAGE_START')
+      return { kind: 'text-start' };
+    if (t === 'TEXT_MESSAGE_END')
+      return { kind: 'text-end' };
+    // Errors
+    if (t === 'error' || t === 'RUN_ERROR')
+      return { kind: 'error', text: evt.error || evt.message || 'Unknown error' };
+  } catch(e) {}
+  return null;
+}
+
+// Render the streaming bubble from current state
+function renderStreamBubble(el, segments, scrollContainer) {
+  let html = '<div class="role-label">assistant</div>';
+  for (const seg of segments) {
+    if (seg.type === 'text') {
+      html += renderMarkdown(seg.content);
+    } else if (seg.type === 'tool') {
+      html += renderToolCallHTML(seg.name, seg.args, seg.result, seg.status);
+    }
+  }
+  el.innerHTML = html;
+  if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg || streaming) return;
+
+  appendMessage('user', msg);
+  input.value = '';
+  input.style.height = 'auto';
+
+  streaming = true;
+  document.getElementById('send-btn').disabled = true;
+
+  // Create a streaming assistant message bubble
+  const msgs = document.getElementById('chat-messages');
+  const empty = msgs.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const streamDiv = document.createElement('div');
+  streamDiv.className = 'message assistant';
+  streamDiv.innerHTML = '<div class="role-label">assistant</div><span class="spinner"></span>';
+  msgs.appendChild(streamDiv);
+  msgs.scrollTop = msgs.scrollHeight;
+
+  // segments: [{type:'text', content:''}, {type:'tool', name, id, args, result, status}]
+  let segments = [];
+  let currentTextSeg = null;
+  // Map tool call ID -> segment index for updating
+  let toolMap = {};
+
+  function getOrCreateTextSeg() {
+    if (currentTextSeg && segments[segments.length - 1] === currentTextSeg) return currentTextSeg;
+    currentTextSeg = { type: 'text', content: '' };
+    segments.push(currentTextSeg);
+    return currentTextSeg;
+  }
+
+  try {
+    const body = { message: msg, userId: 'default' };
+    if (currentSession) body.sessionId = currentSession;
+
+    const resp = await fetch(API + '/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': getAcceptHeader()
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(errText);
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n');
+      buffer = parts.pop();
+
+      for (const line of parts) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        const evt = parseSSEEvent(trimmed);
+        if (!evt) continue;
+
+        switch (evt.kind) {
+          case 'delta': {
+            const seg = getOrCreateTextSeg();
+            seg.content += evt.text;
+            renderStreamBubble(streamDiv, segments, msgs);
+            break;
+          }
+          case 'tool-start': {
+            currentTextSeg = null; // break text segment so next text goes after tool
+            const toolSeg = { type: 'tool', name: evt.name, id: evt.id, args: '', result: null, status: 'running' };
+            toolMap[evt.id] = segments.length;
+            segments.push(toolSeg);
+            renderStreamBubble(streamDiv, segments, msgs);
+            break;
+          }
+          case 'tool-args': {
+            const idx = toolMap[evt.id];
+            if (idx !== undefined) {
+              segments[idx].args += evt.delta;
+              renderStreamBubble(streamDiv, segments, msgs);
+            }
+            break;
+          }
+          case 'tool-end': {
+            // no-op, wait for result
+            break;
+          }
+          case 'tool-result': {
+            const idx = toolMap[evt.id];
+            if (idx !== undefined) {
+              segments[idx].result = evt.output;
+              segments[idx].status = 'done';
+            } else {
+              // Result without a matching start — find by last unresolved or create
+              const toolSeg = { type: 'tool', name: '(tool)', id: evt.id, args: '', result: evt.output, status: 'done' };
+              segments.push(toolSeg);
+              currentTextSeg = null;
+            }
+            renderStreamBubble(streamDiv, segments, msgs);
+            break;
+          }
+          case 'error': {
+            currentTextSeg = null;
+            segments.push({ type: 'text', content: '\n[Error: ' + evt.text + ']' });
+            renderStreamBubble(streamDiv, segments, msgs);
+            break;
+          }
+          case 'text-start': {
+            // New text message in agentic loop iteration — start fresh text segment
+            currentTextSeg = null;
+            break;
+          }
+        }
+      }
+    }
+
+    // If nothing was rendered, remove the empty bubble
+    if (segments.length === 0) {
+      streamDiv.remove();
+    }
+
+    loadSessions();
+  } catch(e) {
+    streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(e.message);
+    toast('Error: ' + e.message);
+  } finally {
+    streaming = false;
+    document.getElementById('send-btn').disabled = false;
+  }
+}
+
+// --- Skills ---
+async function loadSkills() {
+  const r = await fetch(API + '/api/v1/skills');
+  const d = await r.json();
+  const skills = d.skills || [];
+  document.getElementById('skills-count').textContent = skills.length;
+  const list = document.getElementById('skills-list');
+  if (skills.length === 0) {
+    list.innerHTML = '<div class="empty-state">No skills registered yet.</div>';
+    return;
+  }
+  list.innerHTML = skills.map(s => `
+    <div class="item-card">
+      <div class="name">${escapeHtml(s.name)}</div>
+      <div class="desc">${escapeHtml(s.description || '')}</div>
+      <div class="meta-row">
+        <span class="tag ${s.enabled ? 'enabled' : 'disabled'}">${s.enabled ? 'Enabled' : 'Disabled'}</span>
+        ${s.version ? '<span>v' + escapeHtml(s.version) + '</span>' : ''}
+        <span>${(s.tools || []).length} tools</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn sm" onclick="toggleSkill('${s.name}', ${!s.enabled})">${s.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn sm danger" onclick="deleteSkill('${s.name}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function registerSkill() {
+  let tools = [];
+  try { tools = JSON.parse(document.getElementById('skill-tools').value || '[]'); } catch(e) { toast('Invalid tools JSON'); return; }
+  const body = {
+    name: document.getElementById('skill-name').value,
+    description: document.getElementById('skill-desc').value,
+    instructions: document.getElementById('skill-instructions').value,
+    tools
+  };
+  const r = await fetch(API + '/api/v1/skills', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (d.ok) { toast('Skill registered'); loadSkills(); } else toast('Error: ' + d.error);
+}
+
+async function toggleSkill(name, enable) {
+  await fetch(API + '/api/v1/skills/' + name + '/' + (enable ? 'enable' : 'disable'), {method: 'POST'});
+  loadSkills();
+}
+
+async function deleteSkill(name) {
+  if (!confirm('Delete skill "' + name + '"?')) return;
+  await fetch(API + '/api/v1/skills/' + name, {method: 'DELETE'});
+  loadSkills();
+}
+
+// --- Tools ---
+async function loadTools() {
+  const r = await fetch(API + '/api/v1/tools');
+  const d = await r.json();
+  const tools = d.tools || [];
+  document.getElementById('tools-count').textContent = tools.length;
+  const list = document.getElementById('tools-list');
+  if (tools.length === 0) {
+    list.innerHTML = '<div class="empty-state">No tools registered yet.</div>';
+    return;
+  }
+  list.innerHTML = tools.map(t => `
+    <div class="item-card">
+      <div class="name">${escapeHtml(t.name)}</div>
+      <div class="desc">${escapeHtml(t.description || '')}</div>
+      <div class="meta-row">
+        <span class="tag ${t.handler || 'http'}">${t.handler || 'http'}</span>
+        <span>${escapeHtml(t.endpoint || t.scriptPath || '')}</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn sm danger" onclick="deleteTool('${t.name}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function registerTool() {
+  let params = {};
+  try { params = JSON.parse(document.getElementById('tool-params').value || '{}'); } catch(e) { toast('Invalid params JSON'); return; }
+  const handler = document.getElementById('tool-handler').value;
+  const body = {
+    name: document.getElementById('tool-name').value,
+    description: document.getElementById('tool-desc').value,
+    handler,
+    parameters: params,
+  };
+  if (handler === 'http') body.endpoint = document.getElementById('tool-endpoint').value;
+  else body.scriptPath = document.getElementById('tool-endpoint').value;
+
+  const r = await fetch(API + '/api/v1/tools', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (d.ok) { toast('Tool registered'); loadTools(); } else toast('Error: ' + d.error);
+}
+
+async function deleteTool(name) {
+  if (!confirm('Delete tool "' + name + '"?')) return;
+  await fetch(API + '/api/v1/tools/' + name, {method: 'DELETE'});
+  loadTools();
+}
+
+// --- MCP ---
+async function loadMCP() {
+  const r = await fetch(API + '/api/v1/mcp-servers');
+  const d = await r.json();
+  const servers = d.servers || [];
+  document.getElementById('mcp-count').textContent = servers.length;
+  const list = document.getElementById('mcp-list');
+  if (servers.length === 0) {
+    list.innerHTML = '<div class="empty-state">No MCP servers configured.</div>';
+    return;
+  }
+  list.innerHTML = servers.map(s => `
+    <div class="item-card">
+      <div class="name">${escapeHtml(s.name)}</div>
+      <div class="desc">${escapeHtml(s.url)}</div>
+      <div class="meta-row">
+        <span class="tag ${s.enabled ? 'enabled' : 'disabled'}">${s.enabled ? 'Enabled' : 'Disabled'}</span>
+        <span class="tag ${s.transport || 'http'}">${s.transport || 'http'}</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn sm" onclick="discoverMCP('${s.name}')">Discover</button>
+        <button class="btn sm" onclick="toggleMCP('${s.name}', ${!s.enabled})">${s.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn sm danger" onclick="deleteMCP('${s.name}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function addMCPServer() {
+  const body = {
+    name: document.getElementById('mcp-name').value,
+    url: document.getElementById('mcp-url').value,
+    transport: document.getElementById('mcp-transport').value,
+    enabled: true
+  };
+  const r = await fetch(API + '/api/v1/mcp-servers', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (d.ok) { toast('MCP server added'); loadMCP(); } else toast('Error: ' + d.error);
+}
+
+async function discoverMCP(name) {
+  toast('Discovering tools...');
+  const r = await fetch(API + '/api/v1/mcp-servers/' + name + '/discover', {method: 'POST'});
+  const d = await r.json();
+  if (d.tools) {
+    toast('Found ' + d.tools.length + ' tools');
+  } else {
+    toast('Error: ' + (d.error || 'Discovery failed'));
+  }
+}
+
+async function toggleMCP(name, enable) {
+  await fetch(API + '/api/v1/mcp-servers/' + name + '/' + (enable ? 'enable' : 'disable'), {method: 'POST'});
+  loadMCP();
+}
+
+async function deleteMCP(name) {
+  if (!confirm('Delete MCP server "' + name + '"?')) return;
+  await fetch(API + '/api/v1/mcp-servers/' + name, {method: 'DELETE'});
+  loadMCP();
+}
+
+// --- Memory ---
+async function loadMemory() {
+  const scope = document.getElementById('mem-scope').value;
+  const scopeId = document.getElementById('mem-scope-id').value;
+  const r = await fetch(API + '/api/v1/memory/list?scope=' + scope + '&scopeId=' + scopeId);
+  const d = await r.json();
+  const tbody = document.getElementById('memory-tbody');
+  const keys = d.keys || [];
+  if (keys.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:var(--text-muted)">No keys found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = keys.map(k => `
+    <tr>
+      <td>${escapeHtml(k)}</td>
+      <td><button class="btn sm danger" onclick="deleteMemoryKey('${escapeHtml(k)}')">Delete</button></td>
+    </tr>
+  `).join('');
+}
+
+async function setMemory() {
+  const body = {
+    key: document.getElementById('mem-key').value,
+    value: document.getElementById('mem-value').value,
+    scope: document.getElementById('mem-scope').value,
+    scopeId: document.getElementById('mem-scope-id').value,
+  };
+  const r = await fetch(API + '/api/v1/memory', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (d.ok) { toast('Memory set'); loadMemory(); } else toast('Error: ' + d.error);
+}
+
+async function deleteMemoryKey(key) {
+  const scope = document.getElementById('mem-scope').value;
+  const scopeId = document.getElementById('mem-scope-id').value;
+  await fetch(API + '/api/v1/memory?key=' + encodeURIComponent(key) + '&scope=' + scope + '&scopeId=' + scopeId, {method: 'DELETE'});
+  loadMemory();
+}
+
+// --- Workspace ---
+async function loadWorkspace() {
+  const r = await fetch(API + '/api/v1/workspace');
+  const d = await r.json();
+  const files = d.files || [];
+  const list = document.getElementById('workspace-list');
+  if (files.length === 0) {
+    list.innerHTML = '<div class="empty-state">No files in workspace.</div>';
+    return;
+  }
+  list.innerHTML = '<table class="memory-table"><thead><tr><th>Path</th><th>Type</th><th>Actions</th></tr></thead><tbody>' +
+    files.map(f => '<tr><td>' + escapeHtml(f.path) + '</td><td>' + escapeHtml(f.ext || '-') + '</td><td><button class="btn sm danger" onclick="deleteWSFile(\'' + escapeHtml(f.path) + '\')">Delete</button></td></tr>').join('') +
+    '</tbody></table>';
+}
+
+async function uploadFile() {
+  const file = document.getElementById('ws-file').files[0];
+  if (!file) { toast('Select a file'); return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  const path = document.getElementById('ws-path').value;
+  if (path) fd.append('path', path);
+  const r = await fetch(API + '/api/v1/workspace/upload', {method: 'POST', body: fd});
+  const d = await r.json();
+  if (d.path) { toast('Uploaded: ' + d.path); loadWorkspace(); } else toast('Error: ' + d.error);
+}
+
+async function deleteWSFile(path) {
+  if (!confirm('Delete "' + path + '"?')) return;
+  await fetch(API + '/api/v1/workspace/' + path, {method: 'DELETE'});
+  loadWorkspace();
+}
+
+// --- Auto-resize textarea ---
+document.getElementById('chat-input').addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+});
+
+// --- Init ---
+loadProvider();
+loadSessions();
+</script>
+</body>
+</html>

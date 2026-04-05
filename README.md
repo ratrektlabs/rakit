@@ -1,4 +1,4 @@
-# 🛶 rakit
+# rakit
 
 > *Rakit* means bamboo raft in Indonesian — a simple, sturdy vessel that carries you across the river. Built from natural materials, flexible yet reliable. That's what this framework aims to be for AI agents.
 
@@ -9,12 +9,15 @@
 - Multi-provider LLM support (OpenAI, Gemini)
 - Dual protocol streaming (AG-UI / CopilotKit, Vercel AI SDK)
 - **Agentic loop** — tools execute and results feed back automatically until the agent is done
+- **Subagent spawning** — agents can spawn child agents with inherited tools, linked sessions, and independent reasoning
+- **MCP support** — Model Context Protocol client with HTTP/SSE transports and dynamic tool discovery
 - Session persistence with automatic compaction
-- 3-layer skill system (registration -> prompt -> resources)
+- **Scoped memory** — key-value store with global, agent, and user scopes
+- 3-layer skill system (registration -> prompt -> resources) with instruction injection
 - Pluggable storage (SQLite, Firestore, MongoDB + S3, Firebase, local FS)
 - Content negotiation — one agent, any frontend
-- **Admin REST API** — manage sessions, skills, tools, memory, and provider at runtime
-- **TUI client** — Claude Code-like terminal interface with slash commands and streaming
+- **Admin REST API** — manage sessions, skills, tools, MCP servers, memory, workspace, and provider at runtime
+- **Function tools** — register Go functions as tools directly with `WithFunction`
 
 ## Install
 
@@ -33,6 +36,7 @@ import (
     "github.com/ratrektlabs/rakit/agent"
     "github.com/ratrektlabs/rakit/protocol/aisdk"
     "github.com/ratrektlabs/rakit/provider/openai"
+    "github.com/ratrektlabs/rakit/tool"
     metaSQLite "github.com/ratrektlabs/rakit/storage/metadata/sqlite"
     blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
 )
@@ -50,6 +54,16 @@ func main() {
         agent.WithProtocol(aisdk.New()),
         agent.WithStore(store),
         agent.WithFS(fs),
+        agent.WithFunction("greet", "Greet a user by name", map[string]any{
+            "type": "object",
+            "properties": map[string]any{
+                "name": map[string]any{"type": "string"},
+            },
+            "required": []string{"name"},
+        }, func(ctx context.Context, input map[string]any) (*tool.Result, error) {
+            name := input["name"].(string)
+            return tool.Ok(fmt.Sprintf("Hello, %s!", name)), nil
+        }),
     )
 
     // Session-aware run with agentic loop (tools execute automatically)
@@ -71,6 +85,9 @@ Sessions persist multi-turn conversations across requests. Each session stores t
 // Create a new session
 sess, _ := a.CreateSession(ctx)
 
+// Create a session scoped to a user
+sess, _ := a.CreateSessionForUser(ctx, "user-123")
+
 // First message
 a.RunWithSession(ctx, sess.ID, "My name is Alice", aisdk.New())
 
@@ -78,33 +95,43 @@ a.RunWithSession(ctx, sess.ID, "My name is Alice", aisdk.New())
 a.RunWithSession(ctx, sess.ID, "What's my name?", aisdk.New())
 ```
 
-Sessions survive server restarts. Load an existing session by passing its ID.
+Sessions survive server restarts. Load an existing session by passing its ID. Sessions can be filtered by user:
+
+```go
+sessions, _ := store.ListSessionsByUser(ctx, agentID, "user-123")
+```
 
 ### Memory
 
-A key-value store backed by the metadata adapter. Use it for agent facts, user preferences, or any persistent state.
+A scoped key-value store backed by the metadata adapter. Memory supports three scopes:
+
+| Scope | Use case |
+|-------|----------|
+| `global` | Shared across all agents and users |
+| `agent` | Scoped to a specific agent |
+| `user` | Scoped to a specific user |
 
 ```go
-// Store a value
-a.Store.Set(ctx, "user:alice:timezone", []byte("UTC-5"))
+// Scoped memory
+store.SetMemory(ctx, metadata.ScopeUser, "user-123", "timezone", []byte("UTC-5"))
+value, _ := store.GetMemory(ctx, metadata.ScopeUser, "user-123", "timezone")
+keys, _ := store.ListMemory(ctx, metadata.ScopeUser, "user-123", "")
 
-// Retrieve it later
-value, _ := a.Store.Get(ctx, "user:alice:timezone")
-
-// List keys by prefix
-keys, _ := a.Store.List(ctx, "user:alice:")
+// Legacy flat API (delegates to global scope)
+store.Set(ctx, "key", []byte("value"))
+value, _ := store.Get(ctx, "key")
 ```
 
 ### Tools
 
-Tools are capabilities the LLM can call during a run. Define them with a JSON Schema for parameters and an execution handler.
+Tools are capabilities the LLM can call during a run. Each tool returns a structured `Result` with status tracking.
 
 ```go
 type Tool interface {
     Name() string
     Description() string
     Parameters() any
-    Execute(ctx context.Context, input map[string]any) (any, error)
+    Execute(ctx context.Context, input map[string]any) (*Result, error)
 }
 ```
 
@@ -112,11 +139,25 @@ Register tools on the agent:
 
 ```go
 a := agent.New(
+    // Register tool implementations
     agent.WithTools(myTool1, myTool2),
+
+    // Or register Go functions directly
+    agent.WithFunction("search", "Search the web", params,
+        func(ctx context.Context, input map[string]any) (*tool.Result, error) {
+            return tool.Ok(results), nil
+        },
+    ),
 )
 ```
 
-Tool definitions are also persisted in the metadata store so they survive restarts.
+Tool results include structured metadata:
+
+```go
+tool.Ok(data)                                    // success with data
+tool.Err("connection refused", "Check service")  // error with fix recommendation
+tool.Measure(func() (*tool.Result, error) { })   // auto-fills Duration
+```
 
 ### Skills
 
@@ -149,9 +190,45 @@ a.Skills.Register(ctx, &skill.Definition{
 })
 ```
 
-- **L1** keeps overhead minimal — only name and description are loaded for listing
-- **L2** loads the full definition (instructions + tool schemas) when a skill is activated
-- **L3** loads scripts or templates from the blob store only during execution
+Skill instructions are automatically injected into the system prompt when the skill is enabled.
+
+### MCP (Model Context Protocol)
+
+rakit includes an MCP client that connects to external MCP servers and discovers their tools at runtime.
+
+```go
+// MCP registry is auto-created when you set a store
+a := agent.New(agent.WithStore(store))
+
+// Register an MCP server
+store.SaveMCPServer(ctx, &metadata.MCPServerDef{
+    Name:      "filesystem",
+    URL:       "http://localhost:3000",
+    Transport: "http",
+    AgentID:   a.ID,
+    Enabled:   true,
+})
+
+// Tools from enabled MCP servers are automatically merged into the agent's tool registry
+// per-iteration, so newly added servers are picked up without restart
+```
+
+Supported transports: HTTP (JSON-RPC) and SSE (Server-Sent Events).
+
+### Subagents
+
+Agents can spawn child agents for complex subtasks. Child agents inherit tools, skills, and storage from the parent, with their own session linked to the parent.
+
+```go
+// Spawn programmatically
+child := a.Spawn(ctx, parentSessionID, agent.SubagentConfig{
+    System:       "You are a research assistant.",
+    InheritTools: true,
+})
+
+// Or use the built-in spawn_agent tool — the LLM can spawn subagents itself
+a.Tools.Register(a.SpawnAgentTool(protocol))
+```
 
 ### Compaction
 
@@ -164,15 +241,8 @@ a := agent.New(
         KeepRecent:  6,   // always keep last 6 messages intact
         SummaryRole: "system",
     }),
-    // ...
 )
 ```
-
-How it works:
-1. When `RunWithSession` detects history exceeds `MaxMessages`, it splits the messages
-2. Older messages are sent to the LLM for summarization (non-streaming)
-3. The summary replaces the old messages, recent messages are preserved verbatim
-4. If summarization fails, the run continues with full history — never blocks
 
 ### Protocols
 
@@ -196,7 +266,7 @@ p := reg.Negotiate(r.Header.Get("Accept"))
 
 ```go
 // OpenAI
-p := openai.New("gpt-5.4", apiKey)    // or gpt-5.4-mini, gpt-5.4-nano
+p := openai.New("gpt-5.4", apiKey)
 
 // Gemini
 p, _ := gemini.New("gemini-3.1-pro-preview", apiKey)
@@ -210,7 +280,7 @@ p.SetModel("gemini-2.0-flash")
 
 ## Storage Adapters
 
-**Metadata** (sessions, tools, skills, memory):
+**Metadata** (sessions, tools, skills, memory, MCP servers):
 
 | Adapter | Import | Use case |
 |---------|--------|----------|
@@ -236,8 +306,7 @@ p.SetModel("gemini-2.0-flash")
 
 | Example | Description | Storage |
 |---------|-------------|---------|
-| [examples/local](examples/local) | Local dev server with admin API | SQLite + Local FS |
-| [examples/tui](examples/tui) | Claude Code-like TUI client (Bubble Tea) | Connects via HTTP |
+| [examples/local](examples/local) | Local dev server with admin UI and REST API | SQLite + Local FS |
 | [examples/cloud-run](examples/cloud-run) | Cloud Run deployment | MongoDB + S3 |
 
 ## License

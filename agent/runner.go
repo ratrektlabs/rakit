@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ratrektlabs/rakit/protocol"
 	"github.com/ratrektlabs/rakit/provider"
 	"github.com/ratrektlabs/rakit/skill"
 	"github.com/ratrektlabs/rakit/storage/metadata"
@@ -16,7 +15,7 @@ import (
 )
 
 // Run starts the agent with its default protocol (no session persistence).
-func (a *Agent) Run(ctx context.Context, input string) (<-chan protocol.Event, error) {
+func (a *Agent) Run(ctx context.Context, input string) (<-chan Event, error) {
 	return a.RunWithProtocol(ctx, input, a.Protocol)
 }
 
@@ -24,8 +23,8 @@ func (a *Agent) Run(ctx context.Context, input string) (<-chan protocol.Event, e
 func (a *Agent) RunWithProtocol(
 	ctx context.Context,
 	input string,
-	p protocol.Protocol,
-) (<-chan protocol.Event, error) {
+	p Encoder,
+) (<-chan Event, error) {
 	if a.Provider == nil {
 		return nil, fmt.Errorf("agent: no provider configured")
 	}
@@ -39,7 +38,7 @@ func (a *Agent) RunWithProtocol(
 		registry = a.Tools // fallback to static tools only
 	}
 
-	events := make(chan protocol.Event, 100)
+	events := make(chan Event, 100)
 
 	go func() {
 		defer close(events)
@@ -48,7 +47,7 @@ func (a *Agent) RunWithProtocol(
 		runID := generateID()
 
 		// Emit RunStarted
-		events <- &protocol.RunStartedEvent{ThreadID: threadID, RunID: runID}
+		events <- &RunStartedEvent{ThreadID: threadID, RunID: runID}
 
 		req := &provider.Request{
 			Model:    a.Provider.Model(),
@@ -59,7 +58,7 @@ func (a *Agent) RunWithProtocol(
 
 		stream, err := a.Provider.Stream(ctx, req)
 		if err != nil {
-			events <- &protocol.ErrorEvent{Err: err}
+			events <- &ErrorEvent{Err: err}
 			return
 		}
 
@@ -71,7 +70,7 @@ func (a *Agent) RunWithProtocol(
 			if _, ok := event.(*provider.TextDeltaEvent); ok && !textStarted {
 				textStarted = true
 				textMessageID = generateID()
-				events <- &protocol.TextStartEvent{MessageID: textMessageID, Role: "assistant"}
+				events <- &TextStartEvent{MessageID: textMessageID, Role: "assistant"}
 			}
 
 			protoEvent := convertEvent(event)
@@ -81,7 +80,7 @@ func (a *Agent) RunWithProtocol(
 
 			for _, h := range a.hooks {
 				if err := h.OnEvent(ctx, protoEvent); err != nil {
-					events <- &protocol.ErrorEvent{Err: err}
+					events <- &ErrorEvent{Err: err}
 				}
 			}
 
@@ -90,11 +89,11 @@ func (a *Agent) RunWithProtocol(
 
 		// Emit TextEnd if we started a text message
 		if textStarted {
-			events <- &protocol.TextEndEvent{MessageID: textMessageID}
+			events <- &TextEndEvent{MessageID: textMessageID}
 		}
 
 		// Emit RunFinished
-		events <- &protocol.RunFinishedEvent{ThreadID: threadID, RunID: runID}
+		events <- &RunFinishedEvent{ThreadID: threadID, RunID: runID}
 	}()
 
 	return events, nil
@@ -108,8 +107,8 @@ func (a *Agent) RunWithSession(
 	ctx context.Context,
 	sessionID string,
 	input string,
-	p protocol.Protocol,
-) (<-chan protocol.Event, error) {
+	p Encoder,
+) (<-chan Event, error) {
 	if a.Provider == nil {
 		return nil, fmt.Errorf("agent: no provider configured")
 	}
@@ -147,14 +146,14 @@ func (a *Agent) RunWithSession(
 		}
 	}
 
-	events := make(chan protocol.Event, 100)
+	events := make(chan Event, 100)
 
 	go func() {
 		defer close(events)
 
 		threadID := sess.ID
 		runID := generateID()
-		events <- &protocol.RunStartedEvent{ThreadID: threadID, RunID: runID}
+		events <- &RunStartedEvent{ThreadID: threadID, RunID: runID}
 
 		// Build initial provider messages from session history
 		providerMsgs := metadataToProviderMessages(sess.Messages)
@@ -163,7 +162,7 @@ func (a *Agent) RunWithSession(
 		for i := 0; i < a.maxIterations; i++ {
 			// Check context cancellation between iterations
 			if ctx.Err() != nil {
-				events <- &protocol.ErrorEvent{Err: ctx.Err()}
+				events <- &ErrorEvent{Err: ctx.Err()}
 				return
 			}
 
@@ -185,7 +184,7 @@ func (a *Agent) RunWithSession(
 			// Stream from provider
 			stream, err := a.Provider.Stream(ctx, req)
 			if err != nil {
-				events <- &protocol.ErrorEvent{Err: err}
+				events <- &ErrorEvent{Err: err}
 				return
 			}
 
@@ -201,10 +200,10 @@ func (a *Agent) RunWithSession(
 					if !textStarted {
 						textStarted = true
 						textMessageID = generateID()
-						startEvt := &protocol.TextStartEvent{MessageID: textMessageID, Role: "assistant"}
+						startEvt := &TextStartEvent{MessageID: textMessageID, Role: "assistant"}
 						for _, h := range a.hooks {
 							if err := h.OnEvent(ctx, startEvt); err != nil {
-								events <- &protocol.ErrorEvent{Err: err}
+								events <- &ErrorEvent{Err: err}
 							}
 						}
 						events <- startEvt
@@ -226,7 +225,7 @@ func (a *Agent) RunWithSession(
 
 				for _, h := range a.hooks {
 					if err := h.OnEvent(ctx, protoEvent); err != nil {
-						events <- &protocol.ErrorEvent{Err: err}
+						events <- &ErrorEvent{Err: err}
 					}
 				}
 
@@ -235,10 +234,10 @@ func (a *Agent) RunWithSession(
 
 			// Emit TextEnd if we started a text message
 			if textStarted {
-				endEvt := &protocol.TextEndEvent{MessageID: textMessageID}
+				endEvt := &TextEndEvent{MessageID: textMessageID}
 				for _, h := range a.hooks {
 					if err := h.OnEvent(ctx, endEvt); err != nil {
-						events <- &protocol.ErrorEvent{Err: err}
+						events <- &ErrorEvent{Err: err}
 					}
 				}
 				events <- endEvt
@@ -277,7 +276,7 @@ func (a *Agent) RunWithSession(
 
 			// Emit tool call arguments so clients can display request data
 			for _, tc := range responseToolCalls {
-				events <- &protocol.ToolCallArgsEvent{
+				events <- &ToolCallArgsEvent{
 					ToolCallID: tc.ID,
 					Delta:      tc.Arguments,
 				}
@@ -303,7 +302,7 @@ func (a *Agent) RunWithSession(
 						sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
 					}
 
-					events <- &protocol.ToolResultEvent{
+					events <- &ToolResultEvent{
 						ToolCallID: tc.ID,
 						Result:     resultStr,
 					}
@@ -327,7 +326,7 @@ func (a *Agent) RunWithSession(
 						sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
 					}
 
-					events <- &protocol.ToolResultEvent{
+					events <- &ToolResultEvent{
 						ToolCallID: tc.ID,
 						Result:     resultStr,
 					}
@@ -359,7 +358,7 @@ func (a *Agent) RunWithSession(
 					ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
 				})
 
-				events <- &protocol.ToolResultEvent{
+				events <- &ToolResultEvent{
 					ToolCallID: tc.ID,
 					Result:     resultStr,
 				}
@@ -367,7 +366,7 @@ func (a *Agent) RunWithSession(
 		}
 
 		// Emit RunFinished
-		events <- &protocol.RunFinishedEvent{ThreadID: threadID, RunID: runID}
+		events <- &RunFinishedEvent{ThreadID: threadID, RunID: runID}
 
 		// Save session (use Background context to survive request cancellation)
 		if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
@@ -380,7 +379,7 @@ func (a *Agent) RunWithSession(
 
 // RunSubagent spawns a child agent, creates a session, runs it, and collects the final text response.
 // This is the method called by the built-in spawn_agent tool.
-func (a *Agent) RunSubagent(ctx context.Context, parentSessionID, task, system string, p protocol.Protocol) (string, error) {
+func (a *Agent) RunSubagent(ctx context.Context, parentSessionID, task, system string, p Encoder) (string, error) {
 	child := a.Spawn(ctx, parentSessionID, SubagentConfig{
 		System:       system,
 		InheritTools: true,
@@ -399,7 +398,7 @@ func (a *Agent) RunSubagent(ctx context.Context, parentSessionID, task, system s
 	// Collect all text deltas into the final response
 	var result strings.Builder
 	for e := range events {
-		if delta, ok := e.(*protocol.TextDeltaEvent); ok {
+		if delta, ok := e.(*TextDeltaEvent); ok {
 			result.WriteString(delta.Delta)
 		}
 	}
@@ -408,7 +407,7 @@ func (a *Agent) RunSubagent(ctx context.Context, parentSessionID, task, system s
 }
 
 // SpawnAgentTool returns a tool.Tool that lets the LLM spawn subagents.
-func (a *Agent) SpawnAgentTool(p protocol.Protocol) tool.Tool {
+func (a *Agent) SpawnAgentTool(p Encoder) tool.Tool {
 	return tool.NewFunctionTool(
 		"spawn_agent",
 		"Spawn a subagent to handle a subtask autonomously. The subagent inherits all tools and skills. Use this for complex subtasks that benefit from independent reasoning.",
@@ -553,24 +552,24 @@ func (a *Agent) buildMergedRegistry(ctx context.Context) (*tool.Registry, string
 	return registry, strings.Join(instructions, "\n\n"), nil
 }
 
-func convertEvent(e provider.Event) protocol.Event {
+func convertEvent(e provider.Event) Event {
 	switch ev := e.(type) {
 	case *provider.TextDeltaEvent:
-		return &protocol.TextDeltaEvent{Delta: ev.Delta}
+		return &TextDeltaEvent{Delta: ev.Delta}
 	case *provider.ToolCallEvent:
-		return &protocol.ToolCallStartEvent{
+		return &ToolCallStartEvent{
 			ToolCallID:   ev.ID,
 			ToolCallName: ev.Name,
 		}
 	case *provider.ToolResultProviderEvent:
-		return &protocol.ToolResultEvent{
+		return &ToolResultEvent{
 			ToolCallID: ev.ID,
 			Result:     ev.Result,
 		}
 	case *provider.DoneProviderEvent:
-		return &protocol.DoneEvent{}
+		return &DoneEvent{}
 	case *provider.ErrorProviderEvent:
-		return &protocol.ErrorEvent{Err: ev.Err}
+		return &ErrorEvent{Err: ev.Err}
 	}
 	return nil
 }

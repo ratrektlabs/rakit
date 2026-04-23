@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/ratrektlabs/rakit/mcp"
-	"github.com/ratrektlabs/rakit/protocol"
 	"github.com/ratrektlabs/rakit/provider"
 	"github.com/ratrektlabs/rakit/skill"
 	"github.com/ratrektlabs/rakit/storage/blob"
@@ -18,7 +17,7 @@ import (
 type Agent struct {
 	ID            string
 	Provider      provider.Provider
-	Protocol      protocol.Protocol
+	Protocol      Encoder
 	Tools         *tool.Registry
 	Skills        *skill.Registry
 	MCP           *mcp.Registry
@@ -38,7 +37,10 @@ func WithProvider(p provider.Provider) Option {
 	return func(a *Agent) { a.Provider = p }
 }
 
-func WithProtocol(p protocol.Protocol) Option {
+// WithProtocol sets the default [Encoder] the agent uses when callers do
+// not pass one explicitly. The option name is retained for backward
+// compatibility; the underlying type is [Encoder].
+func WithProtocol(p Encoder) Option {
 	return func(a *Agent) { a.Protocol = p }
 }
 

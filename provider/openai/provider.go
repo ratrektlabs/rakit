@@ -6,6 +6,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
 
 	"github.com/ratrektlabs/rakit/provider"
 )
@@ -21,23 +22,28 @@ func New(model, apiKey string) *Provider {
 	return &Provider{client: client, model: model}
 }
 
-func (p *Provider) Name() string        { return "openai" }
-func (p *Provider) Model() string       { return p.model }
-func (p *Provider) SetModel(m string)    { p.model = m }
+func (p *Provider) Name() string      { return "openai" }
+func (p *Provider) Model() string     { return p.model }
+func (p *Provider) SetModel(m string) { p.model = m }
 
 func (p *Provider) Models() []string {
 	return []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}
 }
 
-func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan provider.Event, error) {
-	events := make(chan provider.Event, 100)
-
+// buildParams constructs a ChatCompletionNewParams from a provider.Request.
+// It prepends req.System (if any), converts messages preserving tool calls
+// and tool_call_ids, and attaches tool schemas.
+func (p *Provider) buildParams(req *provider.Request) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model: p.model,
 	}
 
+	if req.System != "" {
+		params.Messages = append(params.Messages, openai.SystemMessage(req.System))
+	}
+
 	for _, msg := range req.Messages {
-		params.Messages = append(params.Messages, toOpenAIMessage(msg)...)
+		params.Messages = append(params.Messages, toOpenAIMessages(msg)...)
 	}
 
 	for _, t := range req.Tools {
@@ -54,6 +60,14 @@ func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan pr
 	if req.Temperature > 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
+
+	return params
+}
+
+func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan provider.Event, error) {
+	events := make(chan provider.Event, 100)
+
+	params := p.buildParams(req)
 
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 	acc := openai.ChatCompletionAccumulator{}
@@ -93,28 +107,7 @@ func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan pr
 }
 
 func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provider.Response, error) {
-	params := openai.ChatCompletionNewParams{
-		Model: p.model,
-	}
-
-	for _, msg := range req.Messages {
-		params.Messages = append(params.Messages, toOpenAIMessage(msg)...)
-	}
-
-	for _, t := range req.Tools {
-		params.Tools = append(params.Tools, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
-			Name:        t.Name,
-			Description: openai.String(t.Description),
-			Parameters:  toOpenAIParams(t.Parameters),
-		}))
-	}
-
-	if req.MaxTokens > 0 {
-		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
-	}
-	if req.Temperature > 0 {
-		params.Temperature = openai.Float(req.Temperature)
-	}
+	params := p.buildParams(req)
 
 	completion, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -141,24 +134,46 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 	return resp, nil
 }
 
-func toOpenAIMessage(msg provider.Message) []openai.ChatCompletionMessageParamUnion {
-	var params []openai.ChatCompletionMessageParamUnion
-
+// toOpenAIMessages converts a provider.Message into one or more OpenAI message
+// params. Assistant messages with tool calls are emitted as a single
+// assistant message carrying a tool_calls array. Tool results are emitted
+// with their tool_call_id (taken from ToolCall.ID) so OpenAI can match them
+// to the original call.
+func toOpenAIMessages(msg provider.Message) []openai.ChatCompletionMessageParamUnion {
 	switch msg.Role {
 	case "system":
-		params = append(params, openai.SystemMessage(msg.Content))
+		return []openai.ChatCompletionMessageParamUnion{openai.SystemMessage(msg.Content)}
 	case "user":
-		params = append(params, openai.UserMessage(msg.Content))
+		return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(msg.Content)}
 	case "assistant":
-		params = append(params, openai.AssistantMessage(msg.Content))
-		for _, tc := range msg.ToolCalls {
-			params = append(params, openai.ToolMessage(tc.Arguments, tc.ID))
+		assistant := openai.ChatCompletionAssistantMessageParam{}
+		if msg.Content != "" {
+			assistant.Content.OfString = param.NewOpt(msg.Content)
 		}
+		for _, tc := range msg.ToolCalls {
+			assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: tc.ID,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name:      tc.Name,
+						Arguments: tc.Arguments,
+					},
+				},
+			})
+		}
+		return []openai.ChatCompletionMessageParamUnion{{OfAssistant: &assistant}}
 	case "tool":
-		params = append(params, openai.ToolMessage(msg.Content, ""))
+		// A tool message carries the result of a single tool_call_id.
+		// The runner builds one "tool" role message per result and stores
+		// the call ID inside ToolCalls[0].ID (with Name also set for
+		// back-compat with the Gemini provider).
+		toolCallID := ""
+		if len(msg.ToolCalls) > 0 {
+			toolCallID = msg.ToolCalls[0].ID
+		}
+		return []openai.ChatCompletionMessageParamUnion{openai.ToolMessage(msg.Content, toolCallID)}
 	}
-
-	return params
+	return nil
 }
 
 func toOpenAIParams(schema any) openai.FunctionParameters {

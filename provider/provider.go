@@ -11,9 +11,9 @@ type Message struct {
 
 // ToolCall represents an LLM tool call.
 type ToolCall struct {
-	ID              string
-	Name            string
-	Arguments       string
+	ID               string
+	Name             string
+	Arguments        string
 	ThoughtSignature []byte // Provider-specific opaque data to include when echoing back
 }
 
@@ -79,9 +79,9 @@ type TextDeltaEvent struct {
 func (e *TextDeltaEvent) Type() EventType { return EventTextDelta }
 
 type ToolCallEvent struct {
-	ID              string
-	Name            string
-	Arguments       string
+	ID               string
+	Name             string
+	Arguments        string
 	ThoughtSignature []byte // Provider-specific opaque data to include when echoing back
 }
 

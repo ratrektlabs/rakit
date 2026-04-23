@@ -15,12 +15,12 @@ import (
 
 // HTTPTool is a tool that calls an HTTP endpoint.
 type HTTPTool struct {
-	name         string
-	description  string
-	parameters   any
-	endpoint     string
-	headers      map[string]string
-	inputMap     map[string]string
+	name          string
+	description   string
+	parameters    any
+	endpoint      string
+	headers       map[string]string
+	inputMap      map[string]string
 	responseField string
 }
 

@@ -28,12 +28,21 @@ func New(model, apiKey string) (*Provider, error) {
 	return &Provider{client: client, model: model}, nil
 }
 
-func (p *Provider) Name() string        { return "gemini" }
-func (p *Provider) Model() string       { return p.model }
-func (p *Provider) SetModel(m string)    { p.model = m }
+func (p *Provider) Name() string      { return "gemini" }
+func (p *Provider) Model() string     { return p.model }
+func (p *Provider) SetModel(m string) { p.model = m }
 
+// Models returns a short, opinionated list of generally-available Gemini
+// models. This is a convenience for UI dropdowns; callers can still pass any
+// model name via SetModel/New.
 func (p *Provider) Models() []string {
-	return []string{"gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview"}
+	return []string{
+		"gemini-2.5-flash",
+		"gemini-2.5-pro",
+		"gemini-2.0-flash",
+		"gemini-flash-latest",
+		"gemini-pro-latest",
+	}
 }
 
 func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan provider.Event, error) {
@@ -100,9 +109,9 @@ func (p *Provider) Stream(ctx context.Context, req *provider.Request) (<-chan pr
 					case part.FunctionCall != nil:
 						args, _ := json.Marshal(part.FunctionCall.Args)
 						events <- &provider.ToolCallEvent{
-							ID:              part.FunctionCall.Name,
-							Name:            part.FunctionCall.Name,
-							Arguments:       string(args),
+							ID:               part.FunctionCall.Name,
+							Name:             part.FunctionCall.Name,
+							Arguments:        string(args),
 							ThoughtSignature: part.ThoughtSignature,
 						}
 					}
@@ -166,9 +175,9 @@ func (p *Provider) Generate(ctx context.Context, req *provider.Request) (*provid
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
 				result.ToolCalls = append(result.ToolCalls, provider.ToolCall{
-					ID:              part.FunctionCall.Name,
-					Name:            part.FunctionCall.Name,
-					Arguments:       string(args),
+					ID:               part.FunctionCall.Name,
+					Name:             part.FunctionCall.Name,
+					Arguments:        string(args),
 					ThoughtSignature: part.ThoughtSignature,
 				})
 			}

@@ -195,6 +195,45 @@ func NewScriptTool(name, description string, parameters any, scriptPath string, 
 	}
 }
 
+// ClientTool is a placeholder for a tool that executes on the caller/frontend
+// rather than in-process. The agent runner detects its ClientSide() marker
+// and emits a ToolCallPendingEvent instead of invoking Execute; the caller
+// is responsible for resolving the call via Agent.Resume with a ToolDecision
+// containing the tool's result.
+type ClientTool struct {
+	name        string
+	description string
+	parameters  any
+}
+
+// NewClientTool creates a ClientTool definition. The tool's actual
+// implementation lives on the client side (e.g. the browser).
+func NewClientTool(name, description string, parameters any) *ClientTool {
+	return &ClientTool{
+		name:        name,
+		description: description,
+		parameters:  parameters,
+	}
+}
+
+func (t *ClientTool) Name() string        { return t.name }
+func (t *ClientTool) Description() string { return t.description }
+func (t *ClientTool) Parameters() any     { return t.parameters }
+
+// ClientSide satisfies the agent.ClientSide marker interface.
+func (t *ClientTool) ClientSide() bool { return true }
+
+// Execute is a fallback that should not normally be invoked — the runner
+// detects ClientSide() and pauses before calling it. It is provided only so
+// that ClientTool satisfies tool.Tool and returns a helpful error if someone
+// executes it directly (e.g. via agent.Run without session).
+func (t *ClientTool) Execute(ctx context.Context, input map[string]any) (*tool.Result, error) {
+	return tool.Err(
+		"client-side tool cannot be executed in-process",
+		"Call Agent.Resume with a ToolDecision containing the result from the client.",
+	), nil
+}
+
 // ToolFromDef builds a tool.Tool from a skill ToolDef.
 func ToolFromDef(def ToolDef, rm *ResourceManager) (tool.Tool, error) {
 	switch def.Handler {
@@ -208,6 +247,8 @@ func ToolFromDef(def ToolDef, rm *ResourceManager) (tool.Tool, error) {
 			return nil, fmt.Errorf("tool %q: script handler requires a script_path", def.Name)
 		}
 		return NewScriptTool(def.Name, def.Description, def.Parameters, def.ScriptPath, rm), nil
+	case "client":
+		return NewClientTool(def.Name, def.Description, def.Parameters), nil
 	default:
 		return nil, fmt.Errorf("tool %q: unknown handler %q", def.Name, def.Handler)
 	}

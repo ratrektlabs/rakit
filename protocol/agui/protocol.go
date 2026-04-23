@@ -60,6 +60,14 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"type":       "TOOL_CALL_END",
 			"toolCallId": e.ToolCallID,
 		})
+	case *protocol.ToolCallPendingEvent:
+		return writeSSE(w, map[string]any{
+			"type":       "TOOL_CALL_PENDING",
+			"toolCallId": e.ToolCallID,
+			"toolName":   e.ToolName,
+			"arguments":  e.Arguments,
+			"reason":     e.Reason,
+		})
 	case *protocol.ToolResultEvent:
 		return writeSSE(w, map[string]any{
 			"type":       "TOOL_CALL_RESULT",

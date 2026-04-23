@@ -55,6 +55,28 @@ func TestEncodeTextDelta(t *testing.T) {
 	}
 }
 
+func TestEncodeToolCallPending(t *testing.T) {
+	frames := parseSSE(encode(t, &protocol.ToolCallPendingEvent{
+		ToolCallID: "tc_1",
+		ToolName:   "delete_item",
+		Arguments:  `{"id":"42"}`,
+		Reason:     "approval_required",
+	}))
+	if len(frames) != 1 {
+		t.Fatalf("frames=%d want 1", len(frames))
+	}
+	f := frames[0]
+	if f["type"] != "tool-call-pending" {
+		t.Fatalf("type=%v", f["type"])
+	}
+	if f["toolCallId"] != "tc_1" || f["toolName"] != "delete_item" {
+		t.Fatalf("missing ids: %+v", f)
+	}
+	if f["reason"] != "approval_required" {
+		t.Fatalf("reason=%v", f["reason"])
+	}
+}
+
 func TestEncodeTextStart(t *testing.T) {
 	frames := parseSSE(encode(t, &protocol.TextStartEvent{MessageID: "m1"}))
 	if frames[0]["type"] != "start" || frames[0]["messageId"] != "m1" {

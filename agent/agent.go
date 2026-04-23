@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"sync"
 
 	"github.com/ratrektlabs/rakit/mcp"
 	"github.com/ratrektlabs/rakit/protocol"
@@ -27,6 +28,10 @@ type Agent struct {
 	hooks         []Hook
 	compaction    CompactionConfig
 	maxIterations int
+	approval      ApprovalPolicy
+	// runCancels holds the cancel func for each active session run, keyed
+	// by session ID. Used by Interrupt to stop a run in flight.
+	runCancels sync.Map
 	// parentSession links a subagent to its parent session
 	parentSessionID string
 }
@@ -81,6 +86,18 @@ func WithCompaction(cfg CompactionConfig) Option {
 // Default is 10. Set to 1 for single-turn behavior.
 func WithMaxIterations(n int) Option {
 	return func(a *Agent) { a.maxIterations = n }
+}
+
+// WithApprovalPolicy gates tool execution on human approval. When the policy
+// returns true for a tool call, the runner pauses, persists the pending tool
+// call on the session, and emits a ToolCallPendingEvent. Resume execution by
+// calling Agent.Resume with a matching ToolDecision.
+//
+// Client-side tools (those implementing the ClientSide marker interface) are
+// always paused regardless of policy — the caller must provide their result
+// via ToolDecision.Result.
+func WithApprovalPolicy(p ApprovalPolicy) Option {
+	return func(a *Agent) { a.approval = p }
 }
 
 // New creates a new Agent with the given options.

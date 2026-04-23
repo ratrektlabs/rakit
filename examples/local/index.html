@@ -233,6 +233,45 @@ body {
 .message .tool-call-item .tc-label.req { color: var(--accent); }
 .message .tool-call-item .tc-label.res { color: var(--success); }
 .message .tool-call-item .tc-label.err { color: var(--danger); }
+.message .tool-call-item .tc-label.pending { color: #f59e0b; }
+.message .tool-call-item.pending { border-color: #f59e0b; }
+.message .tool-call-item .tc-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.message .tool-call-item .tc-actions button {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.message .tool-call-item .tc-actions button.approve {
+  background: var(--success);
+  border-color: var(--success);
+  color: #000;
+}
+.message .tool-call-item .tc-actions button.reject {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.message .tool-call-item .tc-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.message .tool-call-item .tc-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
 .message .tool-call-item .tc-body {
   background: var(--bg);
   border-radius: 4px;
@@ -885,7 +924,7 @@ function appendMessage(role, content, toolCalls) {
 
   if (toolCalls && toolCalls.length > 0) {
     toolCalls.forEach(tc => {
-      html += renderToolCallHTML(tc.name || '', tc.arguments || '', tc.result, tc.status || 'completed');
+      html += renderToolCallHTML(tc.name || '', tc.arguments || '', tc.result, tc.status || 'completed', tc.id || '');
     });
   }
 
@@ -935,13 +974,21 @@ function renderMarkdown(text) {
   return html;
 }
 
-// Render a tool call block with labeled request/response
-function renderToolCallHTML(name, args, result, status) {
+// Render a tool call block with labeled request/response. When status is
+// "pending_approval" the block shows Approve / Reject buttons; when
+// "pending_client" it shows a running-in-browser hint while the client tool
+// resolves asynchronously. Both decisions are dispatched via the pending
+// DOM dataset attributes read by resolvePendingDecisions().
+function renderToolCallHTML(name, args, result, status, id) {
+  const isPending = status === 'pending_approval' || status === 'pending_client';
   const icon = status === 'running' ? '<span class="spinner" style="width:14px;height:14px"></span>'
+    : isPending ? '<span style="color:#f59e0b">&#9888;</span>'
     : status === 'error' || status === 'failed' ? '<span style="color:var(--danger)">&#10007;</span>'
     : '<span style="color:var(--success)">&#10003;</span>';
 
-  let html = '<div class="tool-call-item">';
+  const pendingClass = isPending ? ' pending' : '';
+  const idAttr = id ? ' data-tc-id="' + escapeHtml(id) + '"' : '';
+  let html = '<div class="tool-call-item' + pendingClass + '"' + idAttr + '>';
   html += '<div class="tc-header">' + icon + ' ' + escapeHtml(name) + '</div>';
 
   if (args) {
@@ -951,7 +998,20 @@ function renderToolCallHTML(name, args, result, status) {
       + '<div class="tc-body">' + escapeHtml(prettyArgs) + '</div></div>';
   }
 
-  if (result !== null && result !== undefined) {
+  if (status === 'pending_approval') {
+    html += '<div class="tc-section">'
+      + '<div class="tc-label pending">Approval required</div>'
+      + '<div class="tc-hint">This tool is gated by the agent\'s approval policy. Approve to execute it server-side, or reject to have the agent apologize and try another approach.</div>'
+      + '<div class="tc-actions">'
+      + '<button class="approve" data-tc-decision="approve" data-tc-id="' + escapeHtml(id) + '">Approve &amp; run</button>'
+      + '<button class="reject" data-tc-decision="reject" data-tc-id="' + escapeHtml(id) + '">Reject</button>'
+      + '</div></div>';
+  } else if (status === 'pending_client') {
+    html += '<div class="tc-section">'
+      + '<div class="tc-label pending">Running in browser</div>'
+      + '<div class="tc-hint">Client-side tool — executing in your browser.</div>'
+      + '</div>';
+  } else if (result !== null && result !== undefined) {
     let prettyResult = typeof result === 'string' ? result : JSON.stringify(result);
     try { prettyResult = JSON.stringify(JSON.parse(prettyResult), null, 2); } catch(e) {}
     const labelClass = status === 'error' || status === 'failed' ? 'err' : 'res';
@@ -988,6 +1048,15 @@ function parseSSEEvent(line) {
     // Tool call end
     if (t === 'tool-input-end' || t === 'TOOL_CALL_END')
       return { kind: 'tool-end', id: evt.toolCallId };
+    // Human-in-the-loop: a tool call is waiting for approval or a client-side result
+    if (t === 'tool-call-pending' || t === 'TOOL_CALL_PENDING')
+      return {
+        kind: 'tool-pending',
+        id: evt.toolCallId,
+        name: evt.toolName || '',
+        arguments: evt.arguments || '',
+        reason: evt.reason || 'approval_required'
+      };
     // Tool result
     if (t === 'tool-output-available' || t === 'TOOL_CALL_RESULT')
       return { kind: 'tool-result', id: evt.toolCallId, output: evt.output || evt.content || '' };
@@ -1003,6 +1072,22 @@ function parseSSEEvent(line) {
   return null;
 }
 
+// Dispatch a client-side tool call. The runner emits a tool-call-pending
+// event with reason="client_side" and expects the client to resolve it with
+// a result. Add new client-side tools here by switching on name.
+async function runClientTool(name, args) {
+  switch (name) {
+    case 'browser_time':
+      return {
+        iso: new Date().toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        epochMs: Date.now()
+      };
+    default:
+      return { error: 'unknown client tool: ' + name };
+  }
+}
+
 // Render the streaming bubble from current state
 function renderStreamBubble(el, segments, scrollContainer) {
   let html = '<div class="role-label">assistant</div>';
@@ -1010,11 +1095,144 @@ function renderStreamBubble(el, segments, scrollContainer) {
     if (seg.type === 'text') {
       html += renderMarkdown(seg.content);
     } else if (seg.type === 'tool') {
-      html += renderToolCallHTML(seg.name, seg.args, seg.result, seg.status);
+      html += renderToolCallHTML(seg.name, seg.args, seg.result, seg.status, seg.id);
     }
   }
   el.innerHTML = html;
   if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+}
+
+// Consume an SSE response body into the streaming bubble. Updates segments
+// in-place and returns any pending tool calls that were emitted during the
+// stream (empty if the run finished normally).
+async function consumeStream(resp, ctx) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const pending = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n');
+    buffer = parts.pop();
+
+    for (const line of parts) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const evt = parseSSEEvent(trimmed);
+      if (!evt) continue;
+
+      switch (evt.kind) {
+        case 'delta': {
+          const seg = ctx.getOrCreateTextSeg();
+          seg.content += evt.text;
+          ctx.render();
+          break;
+        }
+        case 'tool-start': {
+          ctx.resetText();
+          const toolSeg = { type: 'tool', name: evt.name, id: evt.id, args: '', result: null, status: 'running' };
+          ctx.toolMap[evt.id] = ctx.segments.length;
+          ctx.segments.push(toolSeg);
+          ctx.render();
+          break;
+        }
+        case 'tool-args': {
+          const idx = ctx.toolMap[evt.id];
+          if (idx !== undefined) {
+            ctx.segments[idx].args += evt.delta;
+            ctx.render();
+          }
+          break;
+        }
+        case 'tool-end':
+          break;
+        case 'tool-pending': {
+          let idx = ctx.toolMap[evt.id];
+          if (idx === undefined) {
+            ctx.resetText();
+            ctx.toolMap[evt.id] = ctx.segments.length;
+            ctx.segments.push({ type: 'tool', name: evt.name, id: evt.id, args: evt.arguments, result: null, status: 'running' });
+            idx = ctx.toolMap[evt.id];
+          }
+          const seg = ctx.segments[idx];
+          if (!seg.args) seg.args = evt.arguments;
+          seg.status = evt.reason === 'client_side' ? 'pending_client' : 'pending_approval';
+          seg.reason = evt.reason;
+          pending.push({ id: evt.id, name: seg.name || evt.name, args: seg.args, reason: evt.reason });
+          ctx.render();
+          break;
+        }
+        case 'tool-result': {
+          const idx = ctx.toolMap[evt.id];
+          if (idx !== undefined) {
+            ctx.segments[idx].result = evt.output;
+            ctx.segments[idx].status = 'done';
+          } else {
+            ctx.segments.push({ type: 'tool', name: '(tool)', id: evt.id, args: '', result: evt.output, status: 'done' });
+            ctx.resetText();
+          }
+          ctx.render();
+          break;
+        }
+        case 'error': {
+          ctx.resetText();
+          ctx.segments.push({ type: 'text', content: '\n[Error: ' + evt.text + ']' });
+          ctx.render();
+          break;
+        }
+        case 'text-start':
+          ctx.resetText();
+          break;
+      }
+    }
+  }
+  return pending;
+}
+
+// Wait for the user to click Approve / Reject on every pending_approval
+// tool card in the bubble. Resolves with an array of ToolDecision objects.
+function awaitApprovalDecisions(streamDiv, toolIds) {
+  return new Promise((resolve) => {
+    const decisions = {};
+    const handler = (e) => {
+      const btn = e.target.closest('button[data-tc-decision]');
+      if (!btn) return;
+      const id = btn.dataset.tcId;
+      if (!toolIds.includes(id)) return;
+      const approve = btn.dataset.tcDecision === 'approve';
+      decisions[id] = { toolCallId: id, approve };
+      // Disable both buttons for this tool call to lock the decision
+      streamDiv.querySelectorAll('button[data-tc-id="' + id + '"]').forEach(b => b.disabled = true);
+      if (Object.keys(decisions).length === toolIds.length) {
+        streamDiv.removeEventListener('click', handler);
+        resolve(toolIds.map(i => decisions[i]));
+      }
+    };
+    streamDiv.addEventListener('click', handler);
+  });
+}
+
+// Resolve all pending tool calls: auto-execute client-side tools, wait for
+// the user on approval-gated ones, then return the merged decision list.
+async function resolvePendingToolCalls(streamDiv, pending) {
+  const clientTools = pending.filter(p => p.reason === 'client_side');
+  const approvalTools = pending.filter(p => p.reason !== 'client_side');
+
+  const clientDecisions = await Promise.all(clientTools.map(async (p) => {
+    let args = {};
+    try { args = p.args ? JSON.parse(p.args) : {}; } catch (e) {}
+    const result = await runClientTool(p.name, args);
+    return { toolCallId: p.id, approve: true, result: JSON.stringify(result) };
+  }));
+
+  const approvalDecisions = approvalTools.length
+    ? await awaitApprovalDecisions(streamDiv, approvalTools.map(p => p.id))
+    : [];
+
+  return [...clientDecisions, ...approvalDecisions];
 }
 
 async function sendMessage() {
@@ -1029,7 +1247,6 @@ async function sendMessage() {
   streaming = true;
   document.getElementById('send-btn').disabled = true;
 
-  // Create a streaming assistant message bubble
   const msgs = document.getElementById('chat-messages');
   const empty = msgs.querySelector('.empty-state');
   if (empty) empty.remove();
@@ -1039,119 +1256,60 @@ async function sendMessage() {
   msgs.appendChild(streamDiv);
   msgs.scrollTop = msgs.scrollHeight;
 
-  // segments: [{type:'text', content:''}, {type:'tool', name, id, args, result, status}]
-  let segments = [];
+  const segments = [];
   let currentTextSeg = null;
-  // Map tool call ID -> segment index for updating
-  let toolMap = {};
+  const toolMap = {};
 
-  function getOrCreateTextSeg() {
-    if (currentTextSeg && segments[segments.length - 1] === currentTextSeg) return currentTextSeg;
-    currentTextSeg = { type: 'text', content: '' };
-    segments.push(currentTextSeg);
-    return currentTextSeg;
-  }
+  const ctx = {
+    segments,
+    toolMap,
+    render: () => renderStreamBubble(streamDiv, segments, msgs),
+    resetText: () => { currentTextSeg = null; },
+    getOrCreateTextSeg: () => {
+      if (currentTextSeg && segments[segments.length - 1] === currentTextSeg) return currentTextSeg;
+      currentTextSeg = { type: 'text', content: '' };
+      segments.push(currentTextSeg);
+      return currentTextSeg;
+    }
+  };
 
   try {
     const body = { message: msg, userId: 'default' };
     if (currentSession) body.sessionId = currentSession;
 
-    const resp = await fetch(API + '/chat', {
+    let resp = await fetch(API + '/chat', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': getAcceptHeader()
-      },
+      headers: { 'Content-Type': 'application/json', 'Accept': getAcceptHeader() },
       body: JSON.stringify(body)
     });
-
     if (!resp.ok) {
       const errText = await resp.text();
       streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(errText);
       return;
     }
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    let pending = await consumeStream(resp, ctx);
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const parts = buffer.split('\n');
-      buffer = parts.pop();
-
-      for (const line of parts) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        const evt = parseSSEEvent(trimmed);
-        if (!evt) continue;
-
-        switch (evt.kind) {
-          case 'delta': {
-            const seg = getOrCreateTextSeg();
-            seg.content += evt.text;
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'tool-start': {
-            currentTextSeg = null; // break text segment so next text goes after tool
-            const toolSeg = { type: 'tool', name: evt.name, id: evt.id, args: '', result: null, status: 'running' };
-            toolMap[evt.id] = segments.length;
-            segments.push(toolSeg);
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'tool-args': {
-            const idx = toolMap[evt.id];
-            if (idx !== undefined) {
-              segments[idx].args += evt.delta;
-              renderStreamBubble(streamDiv, segments, msgs);
-            }
-            break;
-          }
-          case 'tool-end': {
-            // no-op, wait for result
-            break;
-          }
-          case 'tool-result': {
-            const idx = toolMap[evt.id];
-            if (idx !== undefined) {
-              segments[idx].result = evt.output;
-              segments[idx].status = 'done';
-            } else {
-              // Result without a matching start — find by last unresolved or create
-              const toolSeg = { type: 'tool', name: '(tool)', id: evt.id, args: '', result: evt.output, status: 'done' };
-              segments.push(toolSeg);
-              currentTextSeg = null;
-            }
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'error': {
-            currentTextSeg = null;
-            segments.push({ type: 'text', content: '\n[Error: ' + evt.text + ']' });
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'text-start': {
-            // New text message in agentic loop iteration — start fresh text segment
-            currentTextSeg = null;
-            break;
-          }
-        }
+    // Loop: keep resuming until the run completes without pending tool calls.
+    // Each resume re-enters the agentic loop server-side and may itself emit
+    // a new batch of pending calls, so we process them iteratively here.
+    while (pending.length > 0 && currentSession) {
+      const decisions = await resolvePendingToolCalls(streamDiv, pending);
+      const resumeResp = await fetch(API + '/chat/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': getAcceptHeader() },
+        body: JSON.stringify({ sessionId: currentSession, decisions })
+      });
+      if (!resumeResp.ok) {
+        const errText = await resumeResp.text();
+        segments.push({ type: 'text', content: '\n[Resume error: ' + errText + ']' });
+        ctx.render();
+        break;
       }
+      pending = await consumeStream(resumeResp, ctx);
     }
 
-    // If nothing was rendered, remove the empty bubble
-    if (segments.length === 0) {
-      streamDiv.remove();
-    }
-
+    if (segments.length === 0) streamDiv.remove();
     loadSessions();
   } catch(e) {
     streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(e.message);

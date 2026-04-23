@@ -96,3 +96,36 @@ func TestToolFromDefUnknownHandler(t *testing.T) {
 		t.Fatal("expected error for unknown handler")
 	}
 }
+
+func TestToolFromDefClientHandler(t *testing.T) {
+	tool, err := skill.ToolFromDef(skill.ToolDef{
+		Name:        "browser_time",
+		Description: "client side tool",
+		Handler:     "client",
+		Parameters:  map[string]any{"type": "object"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("client handler should not error: %v", err)
+	}
+	ct, ok := tool.(*skill.ClientTool)
+	if !ok {
+		t.Fatalf("expected *skill.ClientTool, got %T", tool)
+	}
+	if !ct.ClientSide() {
+		t.Fatal("ClientSide() must be true")
+	}
+	if ct.Name() != "browser_time" {
+		t.Fatalf("Name()=%q want browser_time", ct.Name())
+	}
+}
+
+func TestClientToolExecuteReturnsHelpfulError(t *testing.T) {
+	tool := skill.NewClientTool("x", "", nil)
+	res, err := tool.Execute(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Execute err: %v", err)
+	}
+	if res.Status != "error" {
+		t.Fatalf("want error status, got %+v", res)
+	}
+}

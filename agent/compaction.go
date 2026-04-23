@@ -95,9 +95,16 @@ func compact(ctx context.Context, p provider.Provider, msgs []metadata.Message, 
 }
 
 // metadataToProviderMessages converts metadata messages to provider messages.
+//
+// For assistant messages that carry tool calls with results already resolved
+// (e.g. when resuming a session that previously ran tools), synthesize the
+// corresponding "tool" role messages so the provider sees a complete
+// call/result chain. Pending tool calls (status "pending_approval" or
+// "pending_client") are kept unresolved — the runner expects them to still
+// need human-in-the-loop resolution.
 func metadataToProviderMessages(msgs []metadata.Message) []provider.Message {
-	out := make([]provider.Message, len(msgs))
-	for i, m := range msgs {
+	out := make([]provider.Message, 0, len(msgs))
+	for _, m := range msgs {
 		pm := provider.Message{
 			Role:    m.Role,
 			Content: m.Content,
@@ -109,9 +116,29 @@ func metadataToProviderMessages(msgs []metadata.Message) []provider.Message {
 				Arguments: tc.Arguments,
 			})
 		}
-		out[i] = pm
+		out = append(out, pm)
+
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.Result == "" || isPendingStatus(tc.Status) {
+				continue
+			}
+			out = append(out, provider.Message{
+				Role:      "tool",
+				Content:   tc.Result,
+				ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
+			})
+		}
 	}
 	return out
+}
+
+// isPendingStatus reports whether a tool call record is awaiting human
+// intervention (approval or client-side resolution).
+func isPendingStatus(status string) bool {
+	return status == "pending_approval" || status == "pending_client"
 }
 
 // providerToolCallsToRecords converts provider tool calls to metadata records.

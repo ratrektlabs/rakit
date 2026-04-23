@@ -44,6 +44,14 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 		})
 	case *protocol.ToolCallEndEvent:
 		return nil // AI SDK doesn't have a tool-input-end
+	case *protocol.ToolCallPendingEvent:
+		return writeData(w, map[string]any{
+			"type":       "tool-call-pending",
+			"toolCallId": e.ToolCallID,
+			"toolName":   e.ToolName,
+			"arguments":  e.Arguments,
+			"reason":     e.Reason,
+		})
 	case *protocol.ToolResultEvent:
 		return writeData(w, map[string]any{
 			"type":       "tool-output-available",

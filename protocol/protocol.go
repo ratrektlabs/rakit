@@ -25,10 +25,11 @@ const (
 	EventTextEnd   EventType = "text-end"
 
 	// Tool calls
-	EventToolCallStart EventType = "tool-call-start"
-	EventToolCallArgs  EventType = "tool-call-args"
-	EventToolCallEnd   EventType = "tool-call-end"
-	EventToolResult    EventType = "tool-result"
+	EventToolCallStart   EventType = "tool-call-start"
+	EventToolCallArgs    EventType = "tool-call-args"
+	EventToolCallEnd     EventType = "tool-call-end"
+	EventToolCallPending EventType = "tool-call-pending"
+	EventToolResult      EventType = "tool-result"
 
 	// State
 	EventStateSnapshot EventType = "state-snapshot"
@@ -132,6 +133,21 @@ type ToolResultEvent struct {
 }
 
 func (e *ToolResultEvent) Type() EventType { return EventToolResult }
+
+// ToolCallPendingEvent signals that a tool call requires human-in-the-loop
+// resolution before the agent can continue. Reason is one of:
+//   - "approval_required": an ApprovalPolicy gated this call; the client
+//     should present an Approve/Reject decision to the user.
+//   - "client_side": the tool executes on the client and the agent is
+//     waiting for the client to provide a Result.
+type ToolCallPendingEvent struct {
+	ToolCallID string
+	ToolName   string
+	Arguments  string
+	Reason     string
+}
+
+func (e *ToolCallPendingEvent) Type() EventType { return EventToolCallPending }
 
 type StateSnapshotEvent struct {
 	Snapshot map[string]any

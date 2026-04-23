@@ -40,6 +40,21 @@ func TestEncodeRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestEncodeToolCallPending(t *testing.T) {
+	m := encodeOne(t, &protocol.ToolCallPendingEvent{
+		ToolCallID: "tc1",
+		ToolName:   "danger",
+		Arguments:  `{"a":1}`,
+		Reason:     "client_side",
+	})
+	if m["type"] != "TOOL_CALL_PENDING" {
+		t.Fatalf("type=%v", m["type"])
+	}
+	if m["toolCallId"] != "tc1" || m["reason"] != "client_side" {
+		t.Fatalf("fields lost: %+v", m)
+	}
+}
+
 func TestEncodeTextMessageLifecycle(t *testing.T) {
 	m := encodeOne(t, &protocol.TextStartEvent{MessageID: "m1"})
 	if m["type"] != "TEXT_MESSAGE_START" || m["role"] != "assistant" {

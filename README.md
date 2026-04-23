@@ -18,6 +18,7 @@
 - Content negotiation — one agent, any frontend
 - **Admin REST API** — manage sessions, skills, tools, MCP servers, memory, workspace, and provider at runtime
 - **Function tools** — register Go functions as tools directly with `WithFunction`
+- **Human-in-the-loop** — gate tool calls on user approval, delegate tools to the browser, or interrupt & resume runs
 
 ## Install
 
@@ -229,6 +230,80 @@ child := a.Spawn(ctx, parentSessionID, agent.SubagentConfig{
 // Or use the built-in spawn_agent tool — the LLM can spawn subagents itself
 a.Tools.Register(a.SpawnAgentTool(protocol))
 ```
+
+### Human-in-the-loop
+
+rakit pauses an agent run whenever a tool call needs human intervention. There
+are three primitives you can compose, all additive — existing code keeps its
+current behavior unless you opt in.
+
+**1. Approval policy.** Gate one or more tools on explicit user approval:
+
+```go
+a := agent.New(
+    agent.WithProvider(prov),
+    agent.WithStore(store),
+    agent.WithProtocol(aisdk.New()),
+    agent.WithApprovalPolicy(agent.RequireFor("delete_item", "drop_table")),
+)
+```
+
+Helpers: `agent.RequireAll()`, `agent.RequireNone()`, `agent.RequireFor(names...)`,
+or implement `agent.ApprovalPolicy` / pass an `agent.ApprovalPolicyFunc` for
+arbitrary logic.
+
+When the model calls a gated tool, the runner persists the call as
+`pending_approval` on the session, emits a `ToolCallPendingEvent`, and ends
+the stream. Resume with:
+
+```go
+events, _ := a.Resume(ctx, sessionID, []agent.ToolDecision{
+    {ToolCallID: "tc_1", Approve: true},  // server executes the tool
+    // or
+    {ToolCallID: "tc_2", Approve: false, Message: "not now"}, // synthetic rejection
+}, aisdk.New())
+```
+
+**2. Client-side tools.** Register a tool whose `Handler` is `"client"` to
+have the frontend execute it:
+
+```go
+a.Skills.Register(ctx, &skill.Definition{
+    Name: "browser",
+    Tools: []skill.ToolDef{{
+        Name:        "browser_time",
+        Description: "Returns the caller's current time",
+        Handler:     "client",
+        Parameters:  map[string]any{"type": "object"},
+    }},
+})
+```
+
+The runner emits a `tool-call-pending` event with `reason: "client_side"`
+instead of invoking the tool. The frontend runs it and resumes with
+`Result`:
+
+```js
+// examples/local/index.html — runClientTool + /chat/resume
+const result = await runClientTool(name, args);
+await fetch('/chat/resume', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'Accept': 'text/vnd.ai-sdk'},
+    body: JSON.stringify({
+        sessionId,
+        decisions: [{ toolCallId, approve: true, result: JSON.stringify(result) }],
+    }),
+});
+```
+
+**3. Interrupt.** Cancel an in-flight run without losing pending state:
+
+```go
+a.Interrupt(sessionID) // signals the current run; pending tool calls survive
+```
+
+Run `examples/local` (the `delete_item` tool is approval-gated and the
+`browser_time` tool is client-side) to see the full loop end-to-end.
 
 ### Compaction
 

@@ -149,233 +149,463 @@ func (a *Agent) RunWithSession(
 
 	events := make(chan protocol.Event, 100)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	a.runCancels.Store(sess.ID, cancel)
+
 	go func() {
 		defer close(events)
+		defer a.runCancels.Delete(sess.ID)
+		defer cancel()
 
 		threadID := sess.ID
 		runID := generateID()
 		events <- &protocol.RunStartedEvent{ThreadID: threadID, RunID: runID}
 
-		// Build initial provider messages from session history
 		providerMsgs := metadataToProviderMessages(sess.Messages)
+		a.agenticLoop(runCtx, events, sess, providerMsgs)
 
-		// Agentic loop
-		for i := 0; i < a.maxIterations; i++ {
-			// Check context cancellation between iterations
-			if ctx.Err() != nil {
-				events <- &protocol.ErrorEvent{Err: ctx.Err()}
-				return
-			}
-
-			// 4. Build merged tool registry per-iteration (dynamic tool loading)
-			registry, systemPrompt, err := a.buildMergedRegistry(ctx)
-			if err != nil {
-				log.Printf("warning: failed to load dynamic tools: %v", err)
-				registry = a.Tools
-			}
-
-			// Build request
-			req := &provider.Request{
-				Model:    a.Provider.Model(),
-				Messages: providerMsgs,
-				Tools:    registry.Schema(),
-				System:   systemPrompt,
-			}
-
-			// Stream from provider
-			stream, err := a.Provider.Stream(ctx, req)
-			if err != nil {
-				events <- &protocol.ErrorEvent{Err: err}
-				return
-			}
-
-			// Accumulate response
-			var responseContent string
-			var responseToolCalls []provider.ToolCall
-			var textMessageID string
-			textStarted := false
-
-			for event := range stream {
-				switch ev := event.(type) {
-				case *provider.TextDeltaEvent:
-					if !textStarted {
-						textStarted = true
-						textMessageID = generateID()
-						startEvt := &protocol.TextStartEvent{MessageID: textMessageID, Role: "assistant"}
-						for _, h := range a.hooks {
-							if err := h.OnEvent(ctx, startEvt); err != nil {
-								events <- &protocol.ErrorEvent{Err: err}
-							}
-						}
-						events <- startEvt
-					}
-					responseContent += ev.Delta
-				case *provider.ToolCallEvent:
-					responseToolCalls = append(responseToolCalls, provider.ToolCall{
-						ID:               ev.ID,
-						Name:             ev.Name,
-						Arguments:        ev.Arguments,
-						ThoughtSignature: ev.ThoughtSignature,
-					})
-				}
-
-				protoEvent := convertEvent(event)
-				if protoEvent == nil {
-					continue
-				}
-
-				for _, h := range a.hooks {
-					if err := h.OnEvent(ctx, protoEvent); err != nil {
-						events <- &protocol.ErrorEvent{Err: err}
-					}
-				}
-
-				events <- protoEvent
-			}
-
-			// Emit TextEnd if we started a text message
-			if textStarted {
-				endEvt := &protocol.TextEndEvent{MessageID: textMessageID}
-				for _, h := range a.hooks {
-					if err := h.OnEvent(ctx, endEvt); err != nil {
-						events <- &protocol.ErrorEvent{Err: err}
-					}
-				}
-				events <- endEvt
-			}
-
-			// No tool calls — final response, save and break
-			if len(responseToolCalls) == 0 {
-				if responseContent != "" {
-					sess.Messages = append(sess.Messages, metadata.Message{
-						ID:        generateID(),
-						Role:      "assistant",
-						Content:   responseContent,
-						CreatedAt: time.Now().UnixMilli(),
-					})
-				}
-				break
-			}
-
-			// Save assistant message with tool calls to history
-			assistantMsg := provider.Message{
-				Role:      "assistant",
-				Content:   responseContent,
-				ToolCalls: responseToolCalls,
-			}
-			providerMsgs = append(providerMsgs, assistantMsg)
-
-			tcRecords := providerToolCallsToRecords(responseToolCalls)
-			assistantMsgIdx := len(sess.Messages)
-			sess.Messages = append(sess.Messages, metadata.Message{
-				ID:        generateID(),
-				Role:      "assistant",
-				Content:   responseContent,
-				ToolCalls: tcRecords,
-				CreatedAt: time.Now().UnixMilli(),
-			})
-
-			// Emit tool call arguments so clients can display request data
-			for _, tc := range responseToolCalls {
-				events <- &protocol.ToolCallArgsEvent{
-					ToolCallID: tc.ID,
-					Delta:      tc.Arguments,
-				}
-			}
-
-			// Execute each tool call
-			for i, tc := range responseToolCalls {
-				t := registry.Get(tc.Name)
-				if t == nil {
-					resultJSON, _ := json.Marshal(map[string]string{
-						"error": fmt.Sprintf("tool %q not found", tc.Name),
-					})
-					resultStr := string(resultJSON)
-					providerMsgs = append(providerMsgs, provider.Message{
-						Role:      "tool",
-						Content:   resultStr,
-						ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
-					})
-
-					// Backfill result into session message
-					if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
-						sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
-						sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
-					}
-
-					events <- &protocol.ToolResultEvent{
-						ToolCallID: tc.ID,
-						Result:     resultStr,
-					}
-					continue
-				}
-
-				var input map[string]any
-				if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
-					resultJSON, _ := json.Marshal(map[string]string{
-						"error": fmt.Sprintf("invalid arguments: %v", err),
-					})
-					resultStr := string(resultJSON)
-					providerMsgs = append(providerMsgs, provider.Message{
-						Role:      "tool",
-						Content:   resultStr,
-						ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
-					})
-
-					if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
-						sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
-						sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
-					}
-
-					events <- &protocol.ToolResultEvent{
-						ToolCallID: tc.ID,
-						Result:     resultStr,
-					}
-					continue
-				}
-
-				result, err := t.Execute(ctx, input)
-				var resultStr string
-				var status string
-				if err != nil {
-					resultStr = fmt.Sprintf(`{"error": "%s"}`, err.Error())
-					status = "failed"
-				} else {
-					b, _ := json.Marshal(result.Data)
-					resultStr = string(b)
-					status = "completed"
-				}
-
-				// Backfill result into session message
-				if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
-					sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
-					sess.Messages[assistantMsgIdx].ToolCalls[i].Status = status
-				}
-
-				// Append tool result for next iteration
-				providerMsgs = append(providerMsgs, provider.Message{
-					Role:      "tool",
-					Content:   resultStr,
-					ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
-				})
-
-				events <- &protocol.ToolResultEvent{
-					ToolCallID: tc.ID,
-					Result:     resultStr,
-				}
-			}
-		}
-
-		// Emit RunFinished
 		events <- &protocol.RunFinishedEvent{ThreadID: threadID, RunID: runID}
 
-		// Save session (use Background context to survive request cancellation)
+		// Save session using Background ctx so the write survives request
+		// cancellation and client Interrupts.
 		if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
 			log.Printf("session save failed: %v", err)
 		}
 	}()
 
 	return events, nil
+}
+
+// ToolDecision resolves a pending tool call when resuming a paused agent run.
+// Each decision is matched to a pending tool call by ToolCallID.
+//
+//   - For "pending_approval" calls:
+//   - Approve=true  → the server executes the registered tool (unless
+//     Result is set, which overrides execution with the provided value).
+//   - Approve=false → the agent sees a synthetic rejection result so it
+//     can react naturally (apologize, ask again, etc.). Message, if
+//     set, is included in the rejection payload.
+//
+//   - For "pending_client" calls:
+//   - Result is required and is passed through as the tool's output.
+//     Approve is ignored (the client has already executed the tool).
+type ToolDecision struct {
+	ToolCallID string
+	Approve    bool
+	Result     string
+	Message    string
+}
+
+// Resume continues a paused agent run by resolving its pending tool calls.
+//
+// A run pauses when it encounters a tool call that requires human approval
+// (per ApprovalPolicy) or is client-side (per the ClientSide marker
+// interface). Resume applies the provided decisions to the session's pending
+// tool calls, emits a ToolResultEvent for each, and re-enters the agentic
+// loop so the model can react to the tool outputs.
+func (a *Agent) Resume(
+	ctx context.Context,
+	sessionID string,
+	decisions []ToolDecision,
+	p protocol.Protocol,
+) (<-chan protocol.Event, error) {
+	if a.Provider == nil {
+		return nil, fmt.Errorf("agent: no provider configured")
+	}
+	if p == nil {
+		return nil, fmt.Errorf("agent: no protocol configured")
+	}
+	if a.Store == nil {
+		return nil, fmt.Errorf("agent: no store configured")
+	}
+
+	sess, err := a.Store.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("agent: load session %q: %w", sessionID, err)
+	}
+	if sess == nil {
+		return nil, fmt.Errorf("agent: session %q not found", sessionID)
+	}
+
+	pendingIdx := findPendingToolCallsMessage(sess.Messages)
+	if pendingIdx < 0 {
+		return nil, fmt.Errorf("agent: no pending tool calls on session %q", sessionID)
+	}
+
+	decMap := make(map[string]ToolDecision, len(decisions))
+	for _, d := range decisions {
+		decMap[d.ToolCallID] = d
+	}
+
+	registry, _, err := a.buildMergedRegistry(ctx)
+	if err != nil {
+		log.Printf("warning: failed to load dynamic tools: %v", err)
+		registry = a.Tools
+	}
+
+	events := make(chan protocol.Event, 100)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	a.runCancels.Store(sess.ID, cancel)
+
+	go func() {
+		defer close(events)
+		defer a.runCancels.Delete(sess.ID)
+		defer cancel()
+
+		threadID := sess.ID
+		runID := generateID()
+		events <- &protocol.RunStartedEvent{ThreadID: threadID, RunID: runID}
+
+		// Resolve each pending tool call on the session's paused assistant
+		// message. Write results back into the stored ToolCallRecords so the
+		// history is self-consistent across subsequent calls.
+		for i := range sess.Messages[pendingIdx].ToolCalls {
+			rec := &sess.Messages[pendingIdx].ToolCalls[i]
+			if !isPendingStatus(rec.Status) {
+				continue
+			}
+			dec, hasDec := decMap[rec.ID]
+			resultStr, status := a.resolvePendingCall(runCtx, rec, dec, hasDec, registry)
+			rec.Result = resultStr
+			rec.Status = status
+
+			events <- &protocol.ToolResultEvent{
+				ToolCallID: rec.ID,
+				Result:     resultStr,
+			}
+		}
+
+		// Continue the agentic loop with the freshly-resolved history.
+		providerMsgs := metadataToProviderMessages(sess.Messages)
+		a.agenticLoop(runCtx, events, sess, providerMsgs)
+
+		events <- &protocol.RunFinishedEvent{ThreadID: threadID, RunID: runID}
+
+		if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
+			log.Printf("session save failed: %v", err)
+		}
+	}()
+
+	return events, nil
+}
+
+// Interrupt cancels an in-flight agent run for the given session. It is a
+// no-op if no run is currently active. Safe to call from any goroutine.
+//
+// Interrupt signals the runner via context cancellation; the runner finishes
+// its current provider stream and exits between iterations. Any partially
+// completed tool calls are preserved on the session so Resume can complete
+// or reject them later.
+func (a *Agent) Interrupt(sessionID string) {
+	a.runCancels.Range(func(key, value any) bool {
+		if key == sessionID {
+			if cancel, ok := value.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+		return true
+	})
+}
+
+// findPendingToolCallsMessage returns the index of the most recent assistant
+// message that carries at least one pending tool call, or -1 if none.
+func findPendingToolCallsMessage(msgs []metadata.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		for _, tc := range msgs[i].ToolCalls {
+			if isPendingStatus(tc.Status) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// resolvePendingCall turns a (ToolCallRecord, ToolDecision) into a concrete
+// result string and a final status ("completed" or "failed").
+func (a *Agent) resolvePendingCall(
+	ctx context.Context,
+	rec *metadata.ToolCallRecord,
+	dec ToolDecision,
+	hasDec bool,
+	registry *tool.Registry,
+) (string, string) {
+	if !hasDec {
+		return rejectionResult(rec.ID, "no decision provided for pending tool call"), "failed"
+	}
+
+	// Approval-gated call that was rejected.
+	if rec.Status == "pending_approval" && !dec.Approve {
+		msg := dec.Message
+		if msg == "" {
+			msg = "user rejected the tool call"
+		}
+		return rejectionResult(rec.ID, msg), "failed"
+	}
+
+	// Caller provided an explicit result — use it verbatim.
+	if dec.Result != "" {
+		return dec.Result, "completed"
+	}
+
+	// Client-side call without a result is a protocol error.
+	if rec.Status == "pending_client" {
+		return rejectionResult(rec.ID, "client tool resolved without a result"), "failed"
+	}
+
+	// Approval-gated call that was approved — execute the tool server-side.
+	t := registry.Get(rec.Name)
+	if t == nil {
+		return rejectionResult(rec.ID, fmt.Sprintf("tool %q not found at resume time", rec.Name)), "failed"
+	}
+	var input map[string]any
+	if rec.Arguments != "" {
+		if err := json.Unmarshal([]byte(rec.Arguments), &input); err != nil {
+			return rejectionResult(rec.ID, fmt.Sprintf("invalid arguments: %v", err)), "failed"
+		}
+	}
+	result, err := t.Execute(ctx, input)
+	if err != nil {
+		return fmt.Sprintf(`{"error": %q}`, err.Error()), "failed"
+	}
+	b, _ := json.Marshal(result.Data)
+	return string(b), "completed"
+}
+
+func rejectionResult(toolCallID, msg string) string {
+	b, _ := json.Marshal(map[string]string{
+		"error":      msg,
+		"toolCallId": toolCallID,
+	})
+	return string(b)
+}
+
+// agenticLoop runs the core provider-stream / tool-exec iteration until the
+// model returns a text-only response, the run pauses for human-in-the-loop,
+// max iterations is reached, or ctx is cancelled. It mutates sess.Messages
+// and expects the caller to persist the session after it returns.
+//
+// This is shared by RunWithSession (after appending the user message) and by
+// Resume (after resolving pending tool calls).
+func (a *Agent) agenticLoop(
+	ctx context.Context,
+	events chan<- protocol.Event,
+	sess *metadata.Session,
+	providerMsgs []provider.Message,
+) {
+	for i := 0; i < a.maxIterations; i++ {
+		if ctx.Err() != nil {
+			events <- &protocol.ErrorEvent{Err: ctx.Err()}
+			return
+		}
+
+		// Build merged tool registry per-iteration (dynamic tool loading)
+		registry, systemPrompt, err := a.buildMergedRegistry(ctx)
+		if err != nil {
+			log.Printf("warning: failed to load dynamic tools: %v", err)
+			registry = a.Tools
+		}
+
+		req := &provider.Request{
+			Model:    a.Provider.Model(),
+			Messages: providerMsgs,
+			Tools:    registry.Schema(),
+			System:   systemPrompt,
+		}
+
+		stream, err := a.Provider.Stream(ctx, req)
+		if err != nil {
+			events <- &protocol.ErrorEvent{Err: err}
+			return
+		}
+
+		var responseContent string
+		var responseToolCalls []provider.ToolCall
+		var textMessageID string
+		textStarted := false
+
+		for event := range stream {
+			switch ev := event.(type) {
+			case *provider.TextDeltaEvent:
+				if !textStarted {
+					textStarted = true
+					textMessageID = generateID()
+					startEvt := &protocol.TextStartEvent{MessageID: textMessageID, Role: "assistant"}
+					for _, h := range a.hooks {
+						if err := h.OnEvent(ctx, startEvt); err != nil {
+							events <- &protocol.ErrorEvent{Err: err}
+						}
+					}
+					events <- startEvt
+				}
+				responseContent += ev.Delta
+			case *provider.ToolCallEvent:
+				responseToolCalls = append(responseToolCalls, provider.ToolCall{
+					ID:               ev.ID,
+					Name:             ev.Name,
+					Arguments:        ev.Arguments,
+					ThoughtSignature: ev.ThoughtSignature,
+				})
+			}
+
+			protoEvent := convertEvent(event)
+			if protoEvent == nil {
+				continue
+			}
+
+			for _, h := range a.hooks {
+				if err := h.OnEvent(ctx, protoEvent); err != nil {
+					events <- &protocol.ErrorEvent{Err: err}
+				}
+			}
+
+			events <- protoEvent
+		}
+
+		if textStarted {
+			endEvt := &protocol.TextEndEvent{MessageID: textMessageID}
+			for _, h := range a.hooks {
+				if err := h.OnEvent(ctx, endEvt); err != nil {
+					events <- &protocol.ErrorEvent{Err: err}
+				}
+			}
+			events <- endEvt
+		}
+
+		// No tool calls — final response, save and break.
+		if len(responseToolCalls) == 0 {
+			if responseContent != "" {
+				sess.Messages = append(sess.Messages, metadata.Message{
+					ID:        generateID(),
+					Role:      "assistant",
+					Content:   responseContent,
+					CreatedAt: time.Now().UnixMilli(),
+				})
+			}
+			return
+		}
+
+		// Save assistant message with tool calls to both provider history
+		// and the persisted session.
+		assistantMsg := provider.Message{
+			Role:      "assistant",
+			Content:   responseContent,
+			ToolCalls: responseToolCalls,
+		}
+		providerMsgs = append(providerMsgs, assistantMsg)
+
+		tcRecords := providerToolCallsToRecords(responseToolCalls)
+		assistantMsgIdx := len(sess.Messages)
+		sess.Messages = append(sess.Messages, metadata.Message{
+			ID:        generateID(),
+			Role:      "assistant",
+			Content:   responseContent,
+			ToolCalls: tcRecords,
+			CreatedAt: time.Now().UnixMilli(),
+		})
+
+		// Emit the full argument payload for each call so clients can
+		// render the request pane immediately.
+		for _, tc := range responseToolCalls {
+			events <- &protocol.ToolCallArgsEvent{
+				ToolCallID: tc.ID,
+				Delta:      tc.Arguments,
+			}
+		}
+
+		// Human-in-the-loop classification: if any call in this batch
+		// requires approval (per ApprovalPolicy) or is a client-side tool,
+		// pause the run. Persist the pending state, emit
+		// ToolCallPendingEvents, and return — Resume will continue the run
+		// once the caller provides decisions.
+		pendingReasons := make([]string, len(responseToolCalls))
+		anyPending := false
+		for idx, tc := range responseToolCalls {
+			t := registry.Get(tc.Name)
+			if t == nil {
+				continue
+			}
+			switch {
+			case isClientSide(t):
+				pendingReasons[idx] = "client_side"
+				anyPending = true
+			case a.approval != nil && a.approval.Require(tc):
+				pendingReasons[idx] = "approval_required"
+				anyPending = true
+			}
+		}
+		if anyPending {
+			for idx, reason := range pendingReasons {
+				if reason == "" {
+					continue
+				}
+				status := "pending_approval"
+				if reason == "client_side" {
+					status = "pending_client"
+				}
+				if idx < len(sess.Messages[assistantMsgIdx].ToolCalls) {
+					sess.Messages[assistantMsgIdx].ToolCalls[idx].Status = status
+				}
+				events <- &protocol.ToolCallPendingEvent{
+					ToolCallID: responseToolCalls[idx].ID,
+					ToolName:   responseToolCalls[idx].Name,
+					Arguments:  responseToolCalls[idx].Arguments,
+					Reason:     reason,
+				}
+			}
+			return
+		}
+
+		// Execute each tool call server-side.
+		for i, tc := range responseToolCalls {
+			resultStr, status := a.executeToolCall(ctx, tc, registry)
+
+			if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
+				sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
+				sess.Messages[assistantMsgIdx].ToolCalls[i].Status = status
+			}
+
+			providerMsgs = append(providerMsgs, provider.Message{
+				Role:      "tool",
+				Content:   resultStr,
+				ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
+			})
+
+			events <- &protocol.ToolResultEvent{
+				ToolCallID: tc.ID,
+				Result:     resultStr,
+			}
+		}
+	}
+}
+
+// executeToolCall invokes a single registered tool, returning its serialized
+// result and a terminal status ("completed" or "failed"). Unknown tools and
+// malformed arguments are converted to friendly errors the model can read.
+func (a *Agent) executeToolCall(
+	ctx context.Context,
+	tc provider.ToolCall,
+	registry *tool.Registry,
+) (string, string) {
+	t := registry.Get(tc.Name)
+	if t == nil {
+		return rejectionResult(tc.ID, fmt.Sprintf("tool %q not found", tc.Name)), "failed"
+	}
+	var input map[string]any
+	if tc.Arguments != "" {
+		if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
+			return rejectionResult(tc.ID, fmt.Sprintf("invalid arguments: %v", err)), "failed"
+		}
+	}
+	result, err := t.Execute(ctx, input)
+	if err != nil {
+		return fmt.Sprintf(`{"error": %q}`, err.Error()), "failed"
+	}
+	b, _ := json.Marshal(result.Data)
+	return string(b), "completed"
 }
 
 // RunSubagent spawns a child agent, creates a session, runs it, and collects the final text response.

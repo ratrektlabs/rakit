@@ -111,36 +111,68 @@ func main() {
 	reg.Register(agui.New())
 	reg.SetDefault(aisdk.New())
 
-	// Agent
+	// Agent with a demo human-in-the-loop policy: the `delete_item` tool
+	// always requires explicit user approval before the runner executes it.
+	// `echo` runs unattended, and `browser_time` is a client-side tool whose
+	// result is provided by the frontend via /chat/resume.
 	a := agent.New(
 		agent.WithProvider(prov),
 		agent.WithProtocol(aisdk.New()),
 		agent.WithStore(store),
 		agent.WithFS(blobStore),
+		agent.WithApprovalPolicy(agent.RequireFor("delete_item")),
 	)
 
 	// Register the spawn_agent tool so the LLM can delegate subtasks
 	a.Tools.Register(a.SpawnAgentTool(reg.Default()))
 
-	// Register a demo skill
+	// Register a demo skill exercising all three tool handler shapes:
+	//   - echo:         unattended HTTP tool (runs immediately)
+	//   - delete_item:  HTTP tool gated by the approval policy above
+	//   - browser_time: client-side tool resolved by the frontend
 	_ = a.Skills.Register(ctx, &skill.Definition{
 		Name:         "echo",
-		Description:  "Echoes back the input",
-		Instructions: "Use the echo tool to repeat what the user says.",
-		Tools: []skill.ToolDef{{
-			Name:        "echo",
-			Description: "Echo back the input text",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"text": map[string]any{"type": "string"},
+		Description:  "Echoes text and exposes a human-in-the-loop demo",
+		Instructions: "Use `echo` to repeat what the user says. Use `delete_item` for destructive actions; it will prompt the user for approval. Use `browser_time` to get the caller's current client-side timestamp.",
+		Tools: []skill.ToolDef{
+			{
+				Name:        "echo",
+				Description: "Echo back the input text",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"text": map[string]any{"type": "string"},
+					},
+					"required": []string{"text"},
 				},
-				"required": []string{"text"},
+				Handler:       "http",
+				Endpoint:      "https://httpbin.org/post",
+				ResponseField: "json",
 			},
-			Handler:       "http",
-			Endpoint:      "https://httpbin.org/post",
-			ResponseField: "json",
-		}},
+			{
+				Name:        "delete_item",
+				Description: "Deletes an item by ID. Destructive; requires human approval.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id": map[string]any{"type": "string", "description": "The item ID to delete."},
+					},
+					"required": []string{"id"},
+				},
+				Handler:       "http",
+				Endpoint:      "https://httpbin.org/post",
+				ResponseField: "json",
+			},
+			{
+				Name:        "browser_time",
+				Description: "Returns the caller's current local time. Executes in the client.",
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+				Handler: "client",
+			},
+		},
 	})
 
 	// HTTP handler
@@ -195,6 +227,65 @@ func main() {
 				log.Printf("Stream error: %v", err)
 			}
 		}
+	})
+
+	// Resume a paused agent run by resolving its pending tool calls. The
+	// client posts one decision per pending tool call; the agent applies
+	// them and re-enters the agentic loop, streaming new events back.
+	mux.HandleFunc("POST /chat/resume", func(w http.ResponseWriter, r *http.Request) {
+		if a.Provider == nil {
+			http.Error(w, "no provider configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		p := reg.Negotiate(r.Header.Get("Accept"))
+		if p == nil {
+			p = reg.Default()
+		}
+		w.Header().Set("Content-Type", p.ContentType())
+
+		var req struct {
+			SessionID string                `json:"sessionId"`
+			Decisions []agent.ToolDecision  `json:"decisions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.SessionID == "" {
+			http.Error(w, "sessionId is required", http.StatusBadRequest)
+			return
+		}
+
+		events, err := a.Resume(r.Context(), req.SessionID, req.Decisions, p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := p.EncodeStream(r.Context(), w, events); err != nil {
+			if r.Context().Err() == nil {
+				log.Printf("Stream error: %v", err)
+			}
+		}
+	})
+
+	// Interrupt an in-flight agent run for the given session. Pending tool
+	// calls are preserved so the client can later Resume or discard them.
+	mux.HandleFunc("POST /chat/interrupt", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.SessionID == "" {
+			http.Error(w, "sessionId is required", http.StatusBadRequest)
+			return
+		}
+		a.Interrupt(req.SessionID)
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	// Admin API

@@ -245,8 +245,8 @@ func main() {
 		w.Header().Set("Content-Type", p.ContentType())
 
 		var req struct {
-			SessionID string                `json:"sessionId"`
-			Decisions []agent.ToolDecision  `json:"decisions"`
+			SessionID string               `json:"sessionId"`
+			Decisions []agent.ToolDecision `json:"decisions"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)

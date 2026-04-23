@@ -180,13 +180,16 @@ func (a *Agent) RunWithSession(
 // Each decision is matched to a pending tool call by ToolCallID.
 //
 //   - For "pending_approval" calls:
+//
 //   - Approve=true  → the server executes the registered tool (unless
 //     Result is set, which overrides execution with the provided value).
+//
 //   - Approve=false → the agent sees a synthetic rejection result so it
 //     can react naturally (apologize, ask again, etc.). Message, if
 //     set, is included in the rejection payload.
 //
 //   - For "pending_client" calls:
+//
 //   - Result is required and is passed through as the tool's output.
 //     Approve is ignored (the client has already executed the tool).
 type ToolDecision struct {

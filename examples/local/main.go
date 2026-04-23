@@ -34,17 +34,28 @@ type providerConfig struct {
 	Model    string `json:"model"`
 }
 
+// envOr returns the value of the named env var, or def if unset/empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
 // loadProviderConfig tries to create a provider from env vars, falling back to
 // config persisted in the metadata store. Returns nil if no config is available.
+//
+// Model names can be overridden with OPENAI_MODEL / GEMINI_MODEL env vars so
+// the example keeps working as providers rotate their model lineup.
 func loadProviderConfig(ctx context.Context, store metadata.Store) (provider.Provider, error) {
 	// Try environment variables first
 	geminiKey := os.Getenv("GEMINI_API_KEY")
 	if geminiKey != "" {
-		return gemini.New("gemini-3.1-pro-preview", geminiKey)
+		return gemini.New(envOr("GEMINI_MODEL", "gemini-2.5-flash"), geminiKey)
 	}
 	openaiKey := os.Getenv("OPENAI_API_KEY")
 	if openaiKey != "" {
-		return openai.New("gpt-5.4", openaiKey), nil
+		return openai.New(envOr("OPENAI_MODEL", "gpt-4o-mini"), openaiKey), nil
 	}
 
 	// Fall back to persisted config

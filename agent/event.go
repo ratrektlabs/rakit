@@ -62,10 +62,19 @@ type RunStartedEvent struct {
 // Type returns the event type.
 func (e *RunStartedEvent) Type() EventType { return EventRunStarted }
 
-// RunFinishedEvent signals the successful completion of an agent run.
+// RunFinishedEvent signals the terminal state of an agent run.
+//
+// [Outcome] reports whether the run completed successfully, was paused by
+// interrupts, or ended in an error. [Interrupts] is populated iff
+// Outcome == [OutcomeInterrupt]; [Result] MAY be set iff Outcome is
+// [OutcomeSuccess] or unset. A zero-value Outcome is treated as success for
+// backward compatibility with older encoders.
 type RunFinishedEvent struct {
-	ThreadID string
-	RunID    string
+	ThreadID   string
+	RunID      string
+	Outcome    RunOutcome
+	Interrupts []Interrupt
+	Result     any
 }
 
 // Type returns the event type.

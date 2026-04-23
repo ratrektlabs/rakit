@@ -60,6 +60,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			user_id           TEXT DEFAULT '',
 			parent_session_id TEXT DEFAULT '',
 			state             TEXT DEFAULT '{}',
+			open_interrupts   TEXT DEFAULT '[]',
 			created_at        INTEGER NOT NULL,
 			updated_at        INTEGER NOT NULL
 		)`,
@@ -125,6 +126,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE tools ADD COLUMN response_field TEXT DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN open_interrupts TEXT DEFAULT '[]'`,
 		`ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'http'`,
 	}
 	for _, a := range alters {
@@ -144,32 +146,33 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 	state := "{}"
 
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (id, agent_id, user_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-		id, agentID, userID, state, now, now,
+		"INSERT INTO sessions (id, agent_id, user_id, state, open_interrupts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id, agentID, userID, state, "[]", now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: create session: %w", err)
 	}
 
 	return &metadata.Session{
-		ID:        id,
-		AgentID:   agentID,
-		UserID:    userID,
-		Messages:  []metadata.Message{},
-		State:     map[string]any{},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             id,
+		AgentID:        agentID,
+		UserID:         userID,
+		Messages:       []metadata.Message{},
+		State:          map[string]any{},
+		OpenInterrupts: []metadata.Interrupt{},
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}, nil
 }
 
 func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, error) {
 	var sess metadata.Session
-	var stateJSON string
+	var stateJSON, interruptsJSON string
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, state, created_at, updated_at FROM sessions WHERE id = ?",
+		"SELECT id, agent_id, user_id, parent_session_id, state, open_interrupts, created_at, updated_at FROM sessions WHERE id = ?",
 		id,
-	).Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &stateJSON, &sess.CreatedAt, &sess.UpdatedAt)
+	).Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &stateJSON, &interruptsJSON, &sess.CreatedAt, &sess.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -179,6 +182,12 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 
 	if err := json.Unmarshal([]byte(stateJSON), &sess.State); err != nil {
 		sess.State = map[string]any{}
+	}
+	if interruptsJSON == "" {
+		interruptsJSON = "[]"
+	}
+	if err := json.Unmarshal([]byte(interruptsJSON), &sess.OpenInterrupts); err != nil {
+		sess.OpenInterrupts = nil
 	}
 
 	msgs, err := s.loadMessages(ctx, id)
@@ -198,6 +207,14 @@ func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error
 	if err != nil {
 		return fmt.Errorf("sqlite: marshal state: %w", err)
 	}
+	interrupts := sess.OpenInterrupts
+	if interrupts == nil {
+		interrupts = []metadata.Interrupt{}
+	}
+	interruptsJSON, err := json.Marshal(interrupts)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal open interrupts: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -206,8 +223,8 @@ func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		"UPDATE sessions SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?, updated_at = ? WHERE id = ?",
-		sess.AgentID, sess.UserID, sess.ParentSessionID, string(stateJSON), now, sess.ID,
+		"UPDATE sessions SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?, open_interrupts = ?, updated_at = ? WHERE id = ?",
+		sess.AgentID, sess.UserID, sess.ParentSessionID, string(stateJSON), string(interruptsJSON), now, sess.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: update session: %w", err)

@@ -15,17 +15,18 @@ import (
 
 // Agent is the core runtime that orchestrates providers, protocols, and tools.
 type Agent struct {
-	ID            string
-	Provider      provider.Provider
-	Protocol      Encoder
-	Tools         *tool.Registry
-	Skills        *skill.Registry
-	MCP           *mcp.Registry
-	Store         metadata.Store
-	FS            blob.BlobStore
-	hooks         []Hook
-	compaction    CompactionConfig
-	maxIterations int
+	ID             string
+	Provider       provider.Provider
+	Protocol       Encoder
+	Tools          *tool.Registry
+	Skills         *skill.Registry
+	MCP            *mcp.Registry
+	Store          metadata.Store
+	FS             blob.BlobStore
+	hooks          []Hook
+	compaction     CompactionConfig
+	maxIterations  int
+	approvalPolicy ApprovalPolicy
 	// parentSession links a subagent to its parent session
 	parentSessionID string
 }
@@ -83,6 +84,19 @@ func WithCompaction(cfg CompactionConfig) Option {
 // Default is 10. Set to 1 for single-turn behavior.
 func WithMaxIterations(n int) Option {
 	return func(a *Agent) { a.maxIterations = n }
+}
+
+// WithApprovalPolicy installs an [ApprovalPolicy] that gates tool execution.
+//
+// Tool calls for which the policy returns true are not executed. Instead the
+// runner raises an [Interrupt] (Reason == "tool_call") and ends the run with
+// [OutcomeInterrupt]. The caller resolves the interrupt by calling
+// [Agent.Resume] with a payload such as {"approved": true} or
+// {"approved": false}.
+//
+// When nil (the default), no tool calls are gated.
+func WithApprovalPolicy(p ApprovalPolicy) Option {
+	return func(a *Agent) { a.approvalPolicy = p }
 }
 
 // New creates a new Agent with the given options.

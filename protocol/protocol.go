@@ -35,11 +35,11 @@ const (
 	EventStateDelta    EventType = "state-delta"
 
 	// Thinking/reasoning
-	EventReasoningStart         EventType = "reasoning-start"
-	EventReasoningMessageStart  EventType = "reasoning-message-start"
-	EventReasoningMessageDelta  EventType = "reasoning-message-delta"
-	EventReasoningMessageEnd    EventType = "reasoning-message-end"
-	EventReasoningEnd           EventType = "reasoning-end"
+	EventReasoningStart        EventType = "reasoning-start"
+	EventReasoningMessageStart EventType = "reasoning-message-start"
+	EventReasoningMessageDelta EventType = "reasoning-message-delta"
+	EventReasoningMessageEnd   EventType = "reasoning-message-end"
+	EventReasoningEnd          EventType = "reasoning-end"
 
 	// Terminal
 	EventError EventType = "error"

@@ -109,6 +109,38 @@ func (a *Agent) CreateSession(ctx context.Context) (*metadata.Session, error) {
 	return a.CreateSessionForUser(ctx, "")
 }
 
+// GetSession loads an existing session from the metadata store.
+func (a *Agent) GetSession(ctx context.Context, sessionID string) (*metadata.Session, error) {
+	if a.Store == nil {
+		return nil, fmt.Errorf("agent: no store configured")
+	}
+	return a.Store.GetSession(ctx, sessionID)
+}
+
+// ListSessions returns all sessions belonging to this agent.
+func (a *Agent) ListSessions(ctx context.Context) ([]*metadata.Session, error) {
+	if a.Store == nil {
+		return nil, fmt.Errorf("agent: no store configured")
+	}
+	return a.Store.ListSessions(ctx, a.ID)
+}
+
+// ListSessionsForUser returns sessions for this agent scoped to a userID.
+func (a *Agent) ListSessionsForUser(ctx context.Context, userID string) ([]*metadata.Session, error) {
+	if a.Store == nil {
+		return nil, fmt.Errorf("agent: no store configured")
+	}
+	return a.Store.ListSessionsByUser(ctx, a.ID, userID)
+}
+
+// DeleteSession removes a session from the metadata store.
+func (a *Agent) DeleteSession(ctx context.Context, sessionID string) error {
+	if a.Store == nil {
+		return fmt.Errorf("agent: no store configured")
+	}
+	return a.Store.DeleteSession(ctx, sessionID)
+}
+
 // CreateSessionForUser creates a new session for this agent scoped to a user.
 func (a *Agent) CreateSessionForUser(ctx context.Context, userID string) (*metadata.Session, error) {
 	if a.Store == nil {
@@ -129,10 +161,10 @@ func (a *Agent) CreateSessionForUser(ctx context.Context, userID string) (*metad
 
 // SubagentConfig configures a spawned subagent.
 type SubagentConfig struct {
-	System        string        // system prompt for the subagent
-	Tools         []tool.Tool   // additional tools (inherits parent tools by default)
-	MaxIterations int           // default: parent's value
-	InheritTools  bool          // default: true
+	System        string      // system prompt for the subagent
+	Tools         []tool.Tool // additional tools (inherits parent tools by default)
+	MaxIterations int         // default: parent's value
+	InheritTools  bool        // default: true
 }
 
 // Spawn creates a child agent that shares storage and provider with the parent.

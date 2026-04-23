@@ -13,8 +13,8 @@ import (
 
 	"github.com/ratrektlabs/rakit/agent"
 	"github.com/ratrektlabs/rakit/protocol"
-	"github.com/ratrektlabs/rakit/protocol/aisdk"
 	"github.com/ratrektlabs/rakit/protocol/agui"
+	"github.com/ratrektlabs/rakit/protocol/aisdk"
 	"github.com/ratrektlabs/rakit/provider"
 	"github.com/ratrektlabs/rakit/provider/gemini"
 	"github.com/ratrektlabs/rakit/provider/openai"

@@ -294,7 +294,7 @@ func (a *Agent) RunWithSession(
 					providerMsgs = append(providerMsgs, provider.Message{
 						Role:      "tool",
 						Content:   resultStr,
-						ToolCalls: []provider.ToolCall{{Name: tc.Name}},
+						ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
 					})
 
 					// Backfill result into session message
@@ -319,7 +319,7 @@ func (a *Agent) RunWithSession(
 					providerMsgs = append(providerMsgs, provider.Message{
 						Role:      "tool",
 						Content:   resultStr,
-						ToolCalls: []provider.ToolCall{{Name: tc.Name}},
+						ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
 					})
 
 					if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
@@ -356,7 +356,7 @@ func (a *Agent) RunWithSession(
 				providerMsgs = append(providerMsgs, provider.Message{
 					Role:      "tool",
 					Content:   resultStr,
-					ToolCalls: []provider.ToolCall{{Name: tc.Name}},
+					ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
 				})
 
 				events <- &protocol.ToolResultEvent{

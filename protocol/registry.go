@@ -1,9 +1,14 @@
 package protocol
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 // Registry manages protocol registration and content negotiation.
+// It is safe for concurrent use.
 type Registry struct {
+	mu        sync.RWMutex
 	protocols map[string]Protocol
 	def       Protocol
 }
@@ -15,18 +20,26 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) Register(p Protocol) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.protocols[p.Name()] = p
 }
 
 func (r *Registry) Get(name string) Protocol {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.protocols[name]
 }
 
 func (r *Registry) SetDefault(p Protocol) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.def = p
 }
 
 func (r *Registry) Default() Protocol {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.def
 }
 
@@ -35,7 +48,12 @@ func (r *Registry) Default() Protocol {
 //	"text/vnd.ag-ui"    → AG-UI protocol
 //	"text/vnd.ai-sdk"   → AI SDK protocol
 //	"text/event-stream" → default protocol
+//
+// Returns nil if no known media type matches.
 func (r *Registry) Negotiate(accept string) Protocol {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	accept = strings.ToLower(accept)
 
 	for _, part := range strings.Split(accept, ",") {

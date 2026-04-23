@@ -16,4 +16,4 @@ type Hook interface {
 type HookFunc func(ctx context.Context, e protocol.Event) error
 
 func (f HookFunc) OnEvent(ctx context.Context, e protocol.Event) error { return f(ctx, e) }
-func (f HookFunc) OnError(_ context.Context, err error) error                   { return err }
+func (f HookFunc) OnError(_ context.Context, err error) error          { return err }

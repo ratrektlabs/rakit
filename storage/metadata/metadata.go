@@ -39,8 +39,8 @@ type ToolDef struct {
 	Name          string            `json:"name" firestore:"name" bson:"name"`
 	Description   string            `json:"description" firestore:"description" bson:"description"`
 	Parameters    any               `json:"parameters" firestore:"parameters" bson:"parameters"`
-	Handler       string            `json:"handler" firestore:"handler" bson:"handler"`                     // "http", "script"
-	Endpoint      string            `json:"endpoint" firestore:"endpoint" bson:"endpoint"`                  // for http handler
+	Handler       string            `json:"handler" firestore:"handler" bson:"handler"`    // "http", "script"
+	Endpoint      string            `json:"endpoint" firestore:"endpoint" bson:"endpoint"` // for http handler
 	Headers       map[string]string `json:"headers" firestore:"headers" bson:"headers"`
 	InputMapping  map[string]string `json:"inputMapping" firestore:"inputMapping" bson:"inputmapping"`
 	ResponseField string            `json:"responseField" firestore:"responseField" bson:"responsefield"`

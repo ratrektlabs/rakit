@@ -1,9 +1,6 @@
 package agent
 
-import (
-	"strings"
-	"time"
-)
+import "time"
 
 // RunOutcome is the terminal state of an agent run.
 //
@@ -151,10 +148,4 @@ func interruptKind(intr Interrupt) string {
 		return s
 	}
 	return ""
-}
-
-// namespaced returns true when the reason uses the reserved namespaced form
-// (e.g. "rakit:subagent_wait"). Unused today; reserved for future reasons.
-func namespaced(reason string) bool {
-	return strings.Contains(reason, ":")
 }

@@ -279,9 +279,12 @@ a.Skills.Register(ctx, &skill.Definition{
 })
 ```
 
-The runner emits a `tool-call-pending` event with `reason: "client_side"`
-instead of invoking the tool. The frontend runs it and resumes with
-`Result`:
+The runner signals the pause with a standard protocol event — AG-UI
+emits a `CUSTOM` event with `name: "tool_call_pending"`, and AI SDK emits
+a `data-tool-call-pending` custom data part. Both carry the same payload:
+`{toolCallId, toolName, arguments, reason}` where `reason` is either
+`"approval_required"` or `"client_side"`. The frontend runs the tool
+and resumes with `Result`:
 
 ```js
 // examples/local/index.html — runClientTool + /chat/resume

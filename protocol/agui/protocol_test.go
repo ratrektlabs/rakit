@@ -47,11 +47,20 @@ func TestEncodeToolCallPending(t *testing.T) {
 		Arguments:  `{"a":1}`,
 		Reason:     "client_side",
 	})
-	if m["type"] != "TOOL_CALL_PENDING" {
+	// AG-UI emits the pending signal as a spec-compliant CUSTOM event
+	// (the protocol reserves CUSTOM for application-specific extensions).
+	if m["type"] != "CUSTOM" {
 		t.Fatalf("type=%v", m["type"])
 	}
-	if m["toolCallId"] != "tc1" || m["reason"] != "client_side" {
-		t.Fatalf("fields lost: %+v", m)
+	if m["name"] != "tool_call_pending" {
+		t.Fatalf("name=%v", m["name"])
+	}
+	v, ok := m["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("value not an object: %+v", m)
+	}
+	if v["toolCallId"] != "tc1" || v["reason"] != "client_side" {
+		t.Fatalf("fields lost: %+v", v)
 	}
 }
 

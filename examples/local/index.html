@@ -1048,15 +1048,32 @@ function parseSSEEvent(line) {
     // Tool call end
     if (t === 'tool-input-end' || t === 'TOOL_CALL_END')
       return { kind: 'tool-end', id: evt.toolCallId };
-    // Human-in-the-loop: a tool call is waiting for approval or a client-side result
-    if (t === 'tool-call-pending' || t === 'TOOL_CALL_PENDING')
+    // Human-in-the-loop: a tool call is waiting for approval or a client-side
+    // result. We encode these as standard protocol primitives:
+    //   AG-UI: a CUSTOM event (spec-reserved extension point)
+    //          {type: "CUSTOM", name: "tool_call_pending", value: {...}}
+    //   AI SDK: a data-* custom data part
+    //          {type: "data-tool-call-pending", id, data: {...}}
+    if (t === 'CUSTOM' && evt.name === 'tool_call_pending') {
+      const v = evt.value || {};
       return {
         kind: 'tool-pending',
-        id: evt.toolCallId,
-        name: evt.toolName || '',
-        arguments: evt.arguments || '',
-        reason: evt.reason || 'approval_required'
+        id: v.toolCallId,
+        name: v.toolName || '',
+        arguments: v.arguments || '',
+        reason: v.reason || 'approval_required'
       };
+    }
+    if (t === 'data-tool-call-pending') {
+      const d = evt.data || {};
+      return {
+        kind: 'tool-pending',
+        id: d.toolCallId || evt.id,
+        name: d.toolName || '',
+        arguments: d.arguments || '',
+        reason: d.reason || 'approval_required'
+      };
+    }
     // Tool result
     if (t === 'tool-output-available' || t === 'TOOL_CALL_RESULT')
       return { kind: 'tool-result', id: evt.toolCallId, output: evt.output || evt.content || '' };
@@ -1072,9 +1089,11 @@ function parseSSEEvent(line) {
   return null;
 }
 
-// Dispatch a client-side tool call. The runner emits a tool-call-pending
-// event with reason="client_side" and expects the client to resolve it with
-// a result. Add new client-side tools here by switching on name.
+// Dispatch a client-side tool call. The runner emits a protocol-native
+// pending signal (AG-UI CUSTOM "tool_call_pending" or AI SDK
+// "data-tool-call-pending") with reason="client_side" and expects the
+// client to resolve it with a result. Add new client-side tools here by
+// switching on name.
 async function runClientTool(name, args) {
   switch (name) {
     case 'browser_time':

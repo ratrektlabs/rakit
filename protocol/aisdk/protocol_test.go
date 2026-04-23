@@ -66,14 +66,23 @@ func TestEncodeToolCallPending(t *testing.T) {
 		t.Fatalf("frames=%d want 1", len(frames))
 	}
 	f := frames[0]
-	if f["type"] != "tool-call-pending" {
+	// Encoded as a Vercel AI SDK v5 "data-*" custom data part so the
+	// wire format stays spec-compliant.
+	if f["type"] != "data-tool-call-pending" {
 		t.Fatalf("type=%v", f["type"])
 	}
-	if f["toolCallId"] != "tc_1" || f["toolName"] != "delete_item" {
-		t.Fatalf("missing ids: %+v", f)
+	if f["id"] != "tc_1" {
+		t.Fatalf("id=%v", f["id"])
 	}
-	if f["reason"] != "approval_required" {
-		t.Fatalf("reason=%v", f["reason"])
+	data, ok := f["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data not an object: %+v", f)
+	}
+	if data["toolCallId"] != "tc_1" || data["toolName"] != "delete_item" {
+		t.Fatalf("missing ids: %+v", data)
+	}
+	if data["reason"] != "approval_required" {
+		t.Fatalf("reason=%v", data["reason"])
 	}
 }
 

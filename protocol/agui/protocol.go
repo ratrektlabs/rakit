@@ -61,12 +61,19 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"toolCallId": e.ToolCallID,
 		})
 	case *protocol.ToolCallPendingEvent:
+		// AG-UI has no first-class "pending tool call" event. The spec
+		// reserves the CUSTOM event for application-specific extensions,
+		// so that is what we use here. Clients look for
+		// name == "tool_call_pending" and read value.* for details.
 		return writeSSE(w, map[string]any{
-			"type":       "TOOL_CALL_PENDING",
-			"toolCallId": e.ToolCallID,
-			"toolName":   e.ToolName,
-			"arguments":  e.Arguments,
-			"reason":     e.Reason,
+			"type": "CUSTOM",
+			"name": "tool_call_pending",
+			"value": map[string]any{
+				"toolCallId": e.ToolCallID,
+				"toolName":   e.ToolName,
+				"arguments":  e.Arguments,
+				"reason":     e.Reason,
+			},
 		})
 	case *protocol.ToolResultEvent:
 		return writeSSE(w, map[string]any{

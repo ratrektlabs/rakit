@@ -65,6 +65,15 @@ func (a *Agent) RunWithProtocol(
 		var textMessageID string
 		textStarted := false
 
+		emit := func(ev Event) {
+			for _, h := range a.hooks {
+				if err := h.OnEvent(ctx, ev); err != nil {
+					events <- &ErrorEvent{Err: err}
+				}
+			}
+			events <- ev
+		}
+
 		for event := range stream {
 			// Emit TextStart before first text delta
 			if _, ok := event.(*provider.TextDeltaEvent); ok && !textStarted {
@@ -73,18 +82,25 @@ func (a *Agent) RunWithProtocol(
 				events <- &TextStartEvent{MessageID: textMessageID, Role: "assistant"}
 			}
 
+			// Tool calls in the non-session path are surfaced to the
+			// client even though we don't execute them: emit the full
+			// start/args/end trio so AI SDK clients receive the
+			// spec-native tool-input-available frame and AG-UI clients
+			// receive the corresponding TOOL_CALL_END.
+			if tc, ok := event.(*provider.ToolCallEvent); ok {
+				emit(&ToolCallStartEvent{ToolCallID: tc.ID, ToolCallName: tc.Name})
+				if tc.Arguments != "" {
+					emit(&ToolCallArgsEvent{ToolCallID: tc.ID, Delta: tc.Arguments})
+				}
+				emit(&ToolCallEndEvent{ToolCallID: tc.ID, Arguments: tc.Arguments})
+				continue
+			}
+
 			protoEvent := convertEvent(event)
 			if protoEvent == nil {
 				continue
 			}
-
-			for _, h := range a.hooks {
-				if err := h.OnEvent(ctx, protoEvent); err != nil {
-					events <- &ErrorEvent{Err: err}
-				}
-			}
-
-			events <- protoEvent
+			emit(protoEvent)
 		}
 
 		// Emit TextEnd if we started a text message
@@ -292,11 +308,19 @@ func (a *Agent) continueAgenticLoop(
 			CreatedAt: time.Now().UnixMilli(),
 		})
 
-		// Emit tool call arguments so clients can display request data
+		// Emit tool call arguments so clients can display request data.
+		// Each call produces an args frame followed by an end frame so
+		// encoders that distinguish "input streaming" from "input
+		// finalised" (e.g. the AI SDK's tool-input-available) can fire
+		// the right wire frame.
 		for _, tc := range responseToolCalls {
 			events <- &ToolCallArgsEvent{
 				ToolCallID: tc.ID,
 				Delta:      tc.Arguments,
+			}
+			events <- &ToolCallEndEvent{
+				ToolCallID: tc.ID,
+				Arguments:  tc.Arguments,
 			}
 		}
 
@@ -610,7 +634,14 @@ func convertEvent(e provider.Event) Event {
 			Result:     ev.Result,
 		}
 	case *provider.DoneProviderEvent:
-		return &DoneEvent{}
+		// The provider's done signal is an internal boundary: the
+		// runner still has post-stream work to emit (tool-input-end,
+		// tool results, [RunFinishedEvent] with optional interrupts).
+		// Returning nil here prevents the encoder from writing a
+		// terminal frame mid-stream — the channel close in
+		// [Encoder.EncodeStream] is the single authoritative
+		// end-of-stream signal.
+		return nil
 	case *provider.ErrorProviderEvent:
 		return &ErrorEvent{Err: ev.Err}
 	}

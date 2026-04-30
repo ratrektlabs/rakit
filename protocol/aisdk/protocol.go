@@ -48,7 +48,25 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"delta":      e.Delta,
 		})
 	case *protocol.ToolCallEndEvent:
-		return nil // AI SDK doesn't have a tool-input-end
+		// AI SDK has no tool-input-end frame, but it does have
+		// tool-input-available which carries the parsed input. Emit it
+		// here so a tool call that pauses on an interrupt (no
+		// tool-output-available follows) is still well-formed: the
+		// dangling tool-input-available is exactly the spec-native
+		// signal the client uses to render an approval / input card.
+		var input any
+		if e.Arguments != "" {
+			if err := json.Unmarshal([]byte(e.Arguments), &input); err != nil {
+				input = e.Arguments
+			}
+		} else {
+			input = map[string]any{}
+		}
+		return writeData(w, map[string]any{
+			"type":       "tool-input-available",
+			"toolCallId": e.ToolCallID,
+			"input":      input,
+		})
 	case *protocol.ToolResultEvent:
 		return writeData(w, map[string]any{
 			"type":       "tool-output-available",
@@ -71,8 +89,13 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"delta": e.Delta,
 		})
 	case *protocol.DoneEvent:
-		_, err := fmt.Fprint(w, "data: [DONE]\n\n")
-		return err
+		// The [DONE] sentinel is owned exclusively by [EncodeStream]
+		// on graceful channel close. Emitting it here as well would
+		// terminate the wire stream mid-flight (AI SDK clients stop
+		// reading at the first sentinel), silently dropping any
+		// post-Done frames the runner is about to write — notably the
+		// tool-input-available the HIL flow relies on.
+		return nil
 	case *protocol.ErrorEvent:
 		return writeData(w, map[string]any{
 			"type":  "error",
@@ -83,21 +106,33 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 }
 
 // EncodeStream drains events into the writer, flushing after every frame.
+//
+// On graceful close (events channel closed) it terminates the wire stream
+// with a `data: [DONE]\n\n` frame, matching the AI SDK's data-stream-protocol
+// expectation. Without this, browser clients block on the read until their
+// idle timer fires.
 func (p *Protocol) EncodeStream(ctx context.Context, w io.Writer, events <-chan protocol.Event) error {
+	flush := func() {
+		if flusher, ok := w.(interface{ Flush() }); ok {
+			flusher.Flush()
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case event, ok := <-events:
 			if !ok {
+				if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+					return err
+				}
+				flush()
 				return nil
 			}
 			if err := p.Encode(w, event); err != nil {
 				return err
 			}
-			if flusher, ok := w.(interface{ Flush() }); ok {
-				flusher.Flush()
-			}
+			flush()
 		}
 	}
 }

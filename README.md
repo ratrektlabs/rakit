@@ -33,6 +33,7 @@ package main
 import (
     "context"
     "fmt"
+    "os"
     "github.com/ratrektlabs/rakit/agent"
     "github.com/ratrektlabs/rakit/protocol/aisdk"
     "github.com/ratrektlabs/rakit/provider/openai"
@@ -49,8 +50,13 @@ func main() {
 
     fs, _ := blobLocal.New("./data/workspace")
 
+    // Read model + key from env so the example keeps working as providers
+    // rotate their model lineups (see AGENTS.md).
+    model := os.Getenv("OPENAI_MODEL")
+    apiKey := os.Getenv("OPENAI_API_KEY")
+
     a := agent.New(
-        agent.WithProvider(openai.New("gpt-4o-mini", "sk-...")),
+        agent.WithProvider(openai.New(model, apiKey)),
         agent.WithProtocol(aisdk.New()),
         agent.WithStore(store),
         agent.WithFS(fs),
@@ -265,11 +271,12 @@ p := reg.Negotiate(r.Header.Get("Accept"))
 ### Providers
 
 ```go
-// OpenAI
-p := openai.New("gpt-4o-mini", apiKey)
+// OpenAI — read the model name from env (or admin config) rather than
+// hardcoding it, since OpenAI rotates the GA lineup.
+p := openai.New(os.Getenv("OPENAI_MODEL"), apiKey)
 
-// Gemini
-p, _ := gemini.New("gemini-2.5-flash", apiKey)
+// Gemini — same pattern.
+p, _ := gemini.New(os.Getenv("GEMINI_MODEL"), apiKey)
 ```
 
 Both implement the same `provider.Provider` interface — swap freely. Model can be changed at runtime:

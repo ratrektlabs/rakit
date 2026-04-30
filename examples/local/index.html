@@ -1311,24 +1311,21 @@ async function sendMessage() {
       // open interrupt — partial resumes produce RUN_ERROR.
       const resume = [];
       for (const seg of pending) {
+        // Always send both keys: interruptId is the AG-UI primary key
+        // (empty for AI SDK callers, since RUN_FINISHED isn't part of
+        // the AI SDK wire); toolCallId is the AI SDK fallback the
+        // server resolves against the session's open interrupts.
+        const ref = { interruptId: seg.interruptId || '', toolCallId: seg.id };
         if (seg.kind === 'client_side') {
           const output = resolveClientSide(seg);
-          resume.push({
-            interruptId: seg.interruptId,
-            status: 'resolved',
-            payload: { output: output }
-          });
+          resume.push({ ...ref, status: 'resolved', payload: { output: output } });
           // Reflect resolution visually so the user sees the swap from
           // "running on client…" to a normal completed tool card.
           const idx = state.toolMap[seg.id];
           state.segments[idx] = { type: 'tool', name: seg.name, id: seg.id, args: seg.args, result: JSON.stringify(output), status: 'done' };
         } else {
           const choice = await waitForApproval(streamDiv, seg);
-          resume.push({
-            interruptId: seg.interruptId,
-            status: 'resolved',
-            payload: { approved: choice === 'approve' }
-          });
+          resume.push({ ...ref, status: 'resolved', payload: { approved: choice === 'approve' } });
           const idx = state.toolMap[seg.id];
           state.segments[idx] = { type: 'tool', name: seg.name, id: seg.id, args: seg.args, result: choice === 'approve' ? '(approved — running…)' : '(rejected by user)', status: choice === 'approve' ? 'running' : 'done' };
         }

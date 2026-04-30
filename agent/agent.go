@@ -34,6 +34,8 @@ type Agent struct {
 // Option configures an Agent.
 type Option func(*Agent)
 
+// WithProvider sets the LLM backend the agent streams from. Required for
+// any [Agent.Run] / [Agent.RunWithSession] / [Agent.Resume] call.
 func WithProvider(p provider.Provider) Option {
 	return func(a *Agent) { a.Provider = p }
 }
@@ -45,6 +47,10 @@ func WithProtocol(p Encoder) Option {
 	return func(a *Agent) { a.Protocol = p }
 }
 
+// WithStore wires the metadata store used for sessions, tool definitions,
+// skills, scoped memory, and MCP servers. Skill and MCP registries are
+// initialised against the same store so callers don't need to wire them
+// individually.
 func WithStore(s metadata.Store) Option {
 	return func(a *Agent) {
 		a.Store = s
@@ -53,10 +59,16 @@ func WithStore(s metadata.Store) Option {
 	}
 }
 
+// WithFS attaches a blob store used by skills for resource files (L3 of the
+// three-layer skill model). Optional; agents that do not use skill
+// resources can omit it.
 func WithFS(fs blob.BlobStore) Option {
 	return func(a *Agent) { a.FS = fs }
 }
 
+// WithTools registers one or more [tool.Tool] implementations on the
+// agent's static registry. These are merged with skill, MCP, and persisted
+// tools at run time.
 func WithTools(tools ...tool.Tool) Option {
 	return func(a *Agent) {
 		for _, t := range tools {
@@ -65,12 +77,18 @@ func WithTools(tools ...tool.Tool) Option {
 	}
 }
 
+// WithFunction registers a Go function as a tool without requiring callers
+// to implement [tool.Tool] explicitly. parameters is a JSON Schema for the
+// arguments object the LLM is expected to produce.
 func WithFunction(name, description string, parameters any, fn tool.ExecuteFunc) Option {
 	return func(a *Agent) {
 		a.Tools.Register(tool.NewFunctionTool(name, description, parameters, fn))
 	}
 }
 
+// WithHooks installs observability hooks fired for every emitted [Event].
+// Hooks are read-only: returning an error surfaces an [ErrorEvent] but does
+// not veto the run.
 func WithHooks(hooks ...Hook) Option {
 	return func(a *Agent) { a.hooks = append(a.hooks, hooks...) }
 }

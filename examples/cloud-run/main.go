@@ -17,6 +17,14 @@ import (
 	metaMongo "github.com/ratrektlabs/rakit/storage/metadata/mongo"
 )
 
+// envOr returns the value of the named env var, or def if unset/empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -43,7 +51,7 @@ func main() {
 
 	// Agent
 	a := agent.New(
-		agent.WithProvider(openai.New("gpt-5.4", apiKey)),
+		agent.WithProvider(openai.New(envOr("OPENAI_MODEL", "gpt-4o-mini"), apiKey)),
 		agent.WithProtocol(aisdk.New()),
 		agent.WithStore(store),
 		agent.WithFS(fs),

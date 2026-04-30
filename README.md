@@ -50,7 +50,7 @@ func main() {
     fs, _ := blobLocal.New("./data/workspace")
 
     a := agent.New(
-        agent.WithProvider(openai.New("gpt-5.4", "sk-...")),
+        agent.WithProvider(openai.New("gpt-4o-mini", "sk-...")),
         agent.WithProtocol(aisdk.New()),
         agent.WithStore(store),
         agent.WithFS(fs),
@@ -266,10 +266,10 @@ p := reg.Negotiate(r.Header.Get("Accept"))
 
 ```go
 // OpenAI
-p := openai.New("gpt-5.4", apiKey)
+p := openai.New("gpt-4o-mini", apiKey)
 
 // Gemini
-p, _ := gemini.New("gemini-3.1-pro-preview", apiKey)
+p, _ := gemini.New("gemini-2.5-flash", apiKey)
 ```
 
 Both implement the same `provider.Provider` interface — swap freely. Model can be changed at runtime:

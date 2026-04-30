@@ -26,8 +26,16 @@ func (p *Provider) Name() string      { return "openai" }
 func (p *Provider) Model() string     { return p.model }
 func (p *Provider) SetModel(m string) { p.model = m }
 
+// Models returns a short, opinionated list of generally-available OpenAI
+// chat models. This is a convenience for UI dropdowns; callers can still
+// pass any model name via SetModel/New as OpenAI rotates the lineup.
 func (p *Provider) Models() []string {
-	return []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}
+	return []string{
+		"gpt-4o",
+		"gpt-4o-mini",
+		"gpt-4.1",
+		"gpt-4.1-mini",
+	}
 }
 
 // buildParams constructs a ChatCompletionNewParams from a provider.Request.

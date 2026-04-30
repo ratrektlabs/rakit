@@ -10,7 +10,7 @@ import (
 // TestBuildParamsIncludesSystem ensures the system prompt is included as a
 // leading system message so skills + compaction summaries reach the model.
 func TestBuildParamsIncludesSystem(t *testing.T) {
-	p := New("gpt-5.4-mini", "test-key")
+	p := New("gpt-4o-mini", "test-key")
 	params := p.buildParams(&provider.Request{
 		System: "you are helpful",
 		Messages: []provider.Message{
@@ -36,7 +36,7 @@ func TestBuildParamsIncludesSystem(t *testing.T) {
 
 // TestBuildParamsSkipsEmptySystem ensures we don't send an empty system message.
 func TestBuildParamsSkipsEmptySystem(t *testing.T) {
-	p := New("gpt-5.4", "k")
+	p := New("gpt-4o-mini", "k")
 	params := p.buildParams(&provider.Request{
 		Messages: []provider.Message{{Role: "user", Content: "hi"}},
 	})
@@ -135,7 +135,7 @@ func TestUserAndSystemRoundTrip(t *testing.T) {
 }
 
 func TestToolSchemaAttached(t *testing.T) {
-	p := New("gpt-5.4", "k")
+	p := New("gpt-4o-mini", "k")
 	params := p.buildParams(&provider.Request{
 		Tools: []provider.Tool{{
 			Name:        "add",

@@ -379,7 +379,11 @@ func (a *Agent) continueAgenticLoop(
 			var resultStr string
 			var status string
 			if err != nil {
-				resultStr = fmt.Sprintf(`{"error": "%s"}`, err.Error())
+				// Use json.Marshal (not Sprintf) so error messages
+				// containing quotes / backslashes / newlines remain
+				// valid JSON for the next provider iteration.
+				b, _ := json.Marshal(map[string]string{"error": err.Error()})
+				resultStr = string(b)
 				status = "failed"
 			} else {
 				b, _ := json.Marshal(result.Data)

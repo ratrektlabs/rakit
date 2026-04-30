@@ -350,7 +350,8 @@ func (a *Agent) executeTool(
 	}
 	result, err := t.Execute(ctx, input)
 	if err != nil {
-		return fmt.Sprintf(`{"error": %q}`, err.Error()), "failed"
+		eb, _ := json.Marshal(map[string]string{"error": err.Error()})
+		return string(eb), "failed"
 	}
 	b, _ := json.Marshal(result.Data)
 	return string(b), "completed"

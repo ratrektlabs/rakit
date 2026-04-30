@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ratrektlabs/rakit/provider"
+	"github.com/ratrektlabs/rakit/storage/metadata"
 	"github.com/ratrektlabs/rakit/storage/metadata/sqlite"
 	"github.com/ratrektlabs/rakit/tool"
 )
@@ -108,6 +109,44 @@ func drain(t *testing.T, ch <-chan Event) *RunFinishedEvent {
 	}
 	return last
 }
+
+// ---------------------------------------------------------------------------
+// Tool-error JSON escaping (regression test)
+// ---------------------------------------------------------------------------
+
+// TestExecuteToolErrorJSONIsValid guards against the previous use of
+// fmt.Sprintf for error payloads, which produced invalid JSON when the error
+// message contained quotes, backslashes, or control characters.
+func TestExecuteToolErrorJSONIsValid(t *testing.T) {
+	a := &Agent{}
+	reg := tool.NewRegistry()
+	reg.Register(tool.NewFunctionTool(
+		"boom", "always errors", nil,
+		func(context.Context, map[string]any) (*tool.Result, error) {
+			return nil, errMsg{"oops with \"quotes\" and \\ backslash\nand newline"}
+		},
+	))
+
+	resultStr, status := a.executeTool(
+		context.Background(),
+		metadata.ToolCallRecord{Name: "boom", Arguments: "{}"},
+		reg,
+	)
+	if status != "failed" {
+		t.Fatalf("status=%q want failed", status)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(resultStr), &got); err != nil {
+		t.Fatalf("result is not valid JSON (%v): %s", err, resultStr)
+	}
+	if !strings.Contains(got["error"], "quotes") || !strings.Contains(got["error"], "newline") {
+		t.Fatalf("error payload missing original message: %q", got["error"])
+	}
+}
+
+type errMsg struct{ s string }
+
+func (e errMsg) Error() string { return e.s }
 
 // ---------------------------------------------------------------------------
 // Classification / pause

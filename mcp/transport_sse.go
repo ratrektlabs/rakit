@@ -166,6 +166,9 @@ func (t *SSETransport) nextRequestID() int {
 	return t.nextID
 }
 
+// Send issues a JSON-RPC 2.0 request: it POSTs to the message endpoint and
+// blocks until the matching response arrives over the SSE stream (or the
+// context is cancelled / the call times out).
 func (t *SSETransport) Send(ctx context.Context, method string, params any, result any) error {
 	if err := t.connect(ctx); err != nil {
 		return err
@@ -243,6 +246,8 @@ func (t *SSETransport) Send(ctx context.Context, method string, params any, resu
 	}
 }
 
+// Notify sends a JSON-RPC 2.0 notification (no response expected) to the
+// message endpoint.
 func (t *SSETransport) Notify(ctx context.Context, method string, params any) error {
 	if err := t.connect(ctx); err != nil {
 		return err
@@ -279,6 +284,8 @@ func (t *SSETransport) Notify(ctx context.Context, method string, params any) er
 	return nil
 }
 
+// Close stops the SSE read loop and releases the underlying HTTP
+// connection.
 func (t *SSETransport) Close() error {
 	if t.cancel != nil {
 		t.cancel()

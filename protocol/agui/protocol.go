@@ -12,12 +12,16 @@ import (
 // Protocol implements the AG-UI (CopilotKit) streaming format.
 type Protocol struct{}
 
+// New constructs a new AG-UI protocol encoder.
 func New() *Protocol { return &Protocol{} }
 
+// Name returns the encoder's stable identifier.
 func (p *Protocol) Name() string { return "ag-ui" }
 
+// ContentType returns the HTTP Content-Type AG-UI streams over (SSE).
 func (p *Protocol) ContentType() string { return "text/event-stream" }
 
+// Encode writes a single event as one AG-UI SSE frame.
 func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 	switch e := event.(type) {
 	case *protocol.RunStartedEvent:
@@ -122,6 +126,8 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 	return nil
 }
 
+// EncodeStream drains events into the writer, flushing after every frame so
+// browser SSE clients see incremental output.
 func (p *Protocol) EncodeStream(ctx context.Context, w io.Writer, events <-chan protocol.Event) error {
 	for {
 		select {
@@ -141,10 +147,12 @@ func (p *Protocol) EncodeStream(ctx context.Context, w io.Writer, events <-chan 
 	}
 }
 
+// Decode is not implemented for AG-UI; this encoder only writes.
 func (p *Protocol) Decode(r io.Reader) (protocol.Event, error) {
 	return nil, fmt.Errorf("agui: Decode not implemented")
 }
 
+// DecodeStream is not implemented for AG-UI; this encoder only writes.
 func (p *Protocol) DecodeStream(ctx context.Context, r io.Reader) (<-chan protocol.Event, error) {
 	return nil, fmt.Errorf("agui: DecodeStream not implemented")
 }

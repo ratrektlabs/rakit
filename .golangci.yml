@@ -13,6 +13,10 @@ linters:
     - staticcheck
     - unconvert
     - unused
+  # revive `exported` rule is intentionally disabled: AGENTS.md requires doc
+  # comments on every exported symbol, but the storage/provider adapter
+  # families have ~80 missing comments today. Adding them is mechanical but
+  # outside the scope of "quick wins" — track in a follow-up PR.
   exclusions:
     rules:
       - path: _test\.go

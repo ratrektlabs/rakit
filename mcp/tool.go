@@ -29,10 +29,17 @@ func NewMCPTool(serverName, toolName, description string, parameters any, client
 	}
 }
 
-func (t *MCPTool) Name() string        { return t.prefixedName }
-func (t *MCPTool) Description() string { return t.description }
-func (t *MCPTool) Parameters() any     { return t.parameters }
+// Name returns the prefixed tool name in the form "mcp/<server>/<tool>".
+func (t *MCPTool) Name() string { return t.prefixedName }
 
+// Description returns the description advertised by the MCP server.
+func (t *MCPTool) Description() string { return t.description }
+
+// Parameters returns the JSON Schema describing the tool's arguments.
+func (t *MCPTool) Parameters() any { return t.parameters }
+
+// Execute calls the underlying MCP tool over the configured transport and
+// returns its result wrapped in a [tool.Result] (with timing metadata).
 func (t *MCPTool) Execute(ctx context.Context, input map[string]any) (*tool.Result, error) {
 	return tool.Measure(func() (*tool.Result, error) {
 		result, err := t.client.CallTool(ctx, t.rawToolName, input)

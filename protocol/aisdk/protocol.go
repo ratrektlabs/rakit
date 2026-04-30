@@ -12,12 +12,17 @@ import (
 // Protocol implements the Vercel AI SDK streaming format.
 type Protocol struct{}
 
+// New constructs a new AI SDK protocol encoder.
 func New() *Protocol { return &Protocol{} }
 
+// Name returns the encoder's stable identifier.
 func (p *Protocol) Name() string { return "ai-sdk" }
 
+// ContentType returns the HTTP Content-Type the AI SDK expects (a
+// line-delimited stream of `data: <json>` frames).
 func (p *Protocol) ContentType() string { return "text/plain; charset=utf-8" }
 
+// Encode writes a single event as one AI SDK data frame.
 func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 	switch e := event.(type) {
 	case *protocol.TextStartEvent:
@@ -77,6 +82,7 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 	return nil
 }
 
+// EncodeStream drains events into the writer, flushing after every frame.
 func (p *Protocol) EncodeStream(ctx context.Context, w io.Writer, events <-chan protocol.Event) error {
 	for {
 		select {
@@ -96,10 +102,12 @@ func (p *Protocol) EncodeStream(ctx context.Context, w io.Writer, events <-chan 
 	}
 }
 
+// Decode is not implemented for the AI SDK; this encoder only writes.
 func (p *Protocol) Decode(r io.Reader) (protocol.Event, error) {
 	return nil, fmt.Errorf("aisdk: Decode not implemented")
 }
 
+// DecodeStream is not implemented for the AI SDK; this encoder only writes.
 func (p *Protocol) DecodeStream(ctx context.Context, r io.Reader) (<-chan protocol.Event, error) {
 	return nil, fmt.Errorf("aisdk: DecodeStream not implemented")
 }

@@ -38,6 +38,8 @@ func (t *HTTPTransport) nextRequestID() int {
 	return t.nextID
 }
 
+// Send issues a JSON-RPC 2.0 request and decodes the response into result.
+// Returns an error for transport, HTTP, or RPC-level failures.
 func (t *HTTPTransport) Send(ctx context.Context, method string, params any, result any) error {
 	reqBody := jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -94,6 +96,7 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any, res
 	return nil
 }
 
+// Notify sends a JSON-RPC 2.0 notification (no response expected).
 func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) error {
 	reqBody := jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -125,6 +128,8 @@ func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) e
 	return nil
 }
 
+// Close is a no-op for HTTP transport; the underlying http.Client is shared
+// and managed by the caller.
 func (t *HTTPTransport) Close() error {
 	return nil
 }

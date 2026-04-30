@@ -148,13 +148,15 @@ type Provider interface {
 
 | Provider | Models |
 |----------|--------|
-| OpenAI | `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano` |
-| Gemini | `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview` |
+| OpenAI | `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini` |
+| Gemini | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash` |
 
-The model is selected at construction time:
+The model is selected at construction time. Per `AGENTS.md`, read it from
+env (or admin config) so the code keeps working as providers rotate their
+GA lineups:
 
 ```go
-p := openai.New("gpt-5.4", apiKey)
+p := openai.New(os.Getenv("OPENAI_MODEL"), apiKey)
 ```
 
 `Stream` is used for agent runs (real-time token flow). `Generate` is used internally for compaction summarization.

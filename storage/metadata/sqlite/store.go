@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +15,20 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// newID returns a random hex identifier suitable for use as a primary key.
+// We use crypto/rand instead of a millisecond timestamp because two rows
+// inserted in the same millisecond (common in tests and bulk imports) would
+// collide on the PK.
+func newID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure is unrecoverable; fall back to a
+		// timestamp-derived value rather than panicking.
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
 
 var _ metadata.Store = (*Store)(nil)
 
@@ -142,7 +158,7 @@ func (s *Store) migrate(ctx context.Context) error {
 
 func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().UnixMilli()
-	id := fmt.Sprintf("%d", now)
+	id := newID()
 	state := "{}"
 
 	_, err := s.db.ExecContext(ctx,
@@ -340,7 +356,7 @@ func (s *Store) loadMessages(ctx context.Context, sessionID string) ([]metadata.
 
 func (s *Store) SaveTool(ctx context.Context, td *metadata.ToolDef) error {
 	if td.ID == "" {
-		td.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
+		td.ID = newID()
 	}
 	if td.CreatedAt == 0 {
 		td.CreatedAt = time.Now().UnixMilli()
@@ -623,7 +639,7 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 
 func (s *Store) SaveMCPServer(ctx context.Context, srv *metadata.MCPServerDef) error {
 	if srv.ID == "" {
-		srv.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
+		srv.ID = newID()
 	}
 	if srv.CreatedAt == 0 {
 		srv.CreatedAt = time.Now().UnixMilli()

@@ -11,35 +11,45 @@ type Event interface {
 // EventType identifies the kind of event.
 type EventType string
 
+// Lifecycle event types.
 const (
-	// Lifecycle
 	EventRunStarted  EventType = "run-started"
 	EventRunFinished EventType = "run-finished"
 	EventRunError    EventType = "run-error"
+)
 
-	// Text streaming
+// Text streaming event types.
+const (
 	EventTextStart EventType = "text-start"
 	EventTextDelta EventType = "text-delta"
 	EventTextEnd   EventType = "text-end"
+)
 
-	// Tool calls
+// Tool-call event types.
+const (
 	EventToolCallStart EventType = "tool-call-start"
 	EventToolCallArgs  EventType = "tool-call-args"
 	EventToolCallEnd   EventType = "tool-call-end"
 	EventToolResult    EventType = "tool-result"
+)
 
-	// State
+// State event types.
+const (
 	EventStateSnapshot EventType = "state-snapshot"
 	EventStateDelta    EventType = "state-delta"
+)
 
-	// Thinking/reasoning
+// Reasoning / thinking event types.
+const (
 	EventReasoningStart        EventType = "reasoning-start"
 	EventReasoningMessageStart EventType = "reasoning-message-start"
 	EventReasoningMessageDelta EventType = "reasoning-message-delta"
 	EventReasoningMessageEnd   EventType = "reasoning-message-end"
 	EventReasoningEnd          EventType = "reasoning-end"
+)
 
-	// Terminal
+// Terminal event types.
+const (
 	EventError EventType = "error"
 	EventDone  EventType = "done"
 )

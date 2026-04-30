@@ -201,6 +201,11 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", p.ContentType())
+		// Surface the session id in a header so clients that didn't
+		// pre-create a session can still address the same session on
+		// the resume turn. Both AG-UI (threadId on RUN_STARTED) and
+		// AI SDK (no run lifecycle frame) callers benefit from this.
+		w.Header().Set("Access-Control-Expose-Headers", "X-Session-Id")
 
 		// The single /chat envelope carries either a fresh user turn
 		// (Message) or a resume of one or more open interrupts
@@ -239,6 +244,7 @@ func main() {
 			}
 			req.SessionID = sess.ID
 		}
+		w.Header().Set("X-Session-Id", req.SessionID)
 
 		var (
 			events <-chan agent.Event

@@ -1075,6 +1075,13 @@ async function streamChat(body, streamDiv, state) {
     streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(errText);
     return { ok: false };
   }
+  // The server surfaces the session id in a header so resume turns
+  // address the same session even when the user didn't pre-create one.
+  const respSessionId = resp.headers.get('X-Session-Id');
+  if (respSessionId) {
+    state.sessionId = respSessionId;
+    currentSession = respSessionId;
+  }
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -1172,18 +1179,32 @@ function classifyInterruptKind(intr, toolName) {
   if (intr && intr.metadata && intr.metadata['rakit.kind']) {
     return intr.metadata['rakit.kind'];
   }
-  if (toolName === 'browser_time') return 'client_side';
-  return 'approval_required';
+  return KNOWN_HIL_TOOLS[toolName] || 'approval_required';
 }
+
+// Demo-known HIL tool names. The AI SDK has no equivalent of AG-UI's
+// structured interrupts[] frame, so the FE can't reliably tell a paused
+// gated tool apart from a paused ungated sibling in a mixed batch.
+// Hardcoding the tool names mirrors the demo backend wiring; production
+// callers using AI SDK can render approvals through a dynamic-tool
+// `approve` indirection instead.
+const KNOWN_HIL_TOOLS = { 'delete_item': 'approval_required', 'browser_time': 'client_side' };
 
 // promoteInterruptSegments converts paused tool segments to interrupt
 // segments so the user sees an approval / client-side card instead of an
 // indefinite "running" spinner.
+//
+// AG-UI: only tools whose toolCallId appears in the interrupts[] list are
+// promoted — ungated siblings in a mixed batch are left alone (the server
+// will execute them on resume).
+//
+// AI SDK: no structured interrupts[] arrives, so we fall back to the
+// hardcoded KNOWN_HIL_TOOLS demo wiring. Anything else stays a normal
+// running tool.
 function promoteInterruptSegments(state, interrupts) {
-  // Build toolCallId -> Interrupt map. AG-UI-only: AI SDK doesn't carry
-  // this structured frame, so we synthesize one entry per pending tool.
   const byTool = {};
-  for (const intr of interrupts) {
+  const hasStructuredInterrupts = !!(interrupts && interrupts.length);
+  for (const intr of (interrupts || [])) {
     if (intr && intr.toolCallId) byTool[intr.toolCallId] = intr;
   }
   const pending = [];
@@ -1191,7 +1212,19 @@ function promoteInterruptSegments(state, interrupts) {
     const idx = state.toolMap[id];
     const seg = state.segments[idx];
     if (!seg || seg.type !== 'tool' || seg.status !== 'running') continue;
+
     const intr = byTool[id];
+    if (hasStructuredInterrupts) {
+      // AG-UI told us exactly which tools paused. Skip any sibling
+      // that isn't in the interrupts[] list.
+      if (!intr) continue;
+    } else {
+      // AI SDK fallback — only promote tools the demo configured as
+      // HIL. Anything else is treated as a normal in-flight tool
+      // whose result simply hasn't arrived yet.
+      if (!Object.prototype.hasOwnProperty.call(KNOWN_HIL_TOOLS, seg.name)) continue;
+    }
+
     const kind = classifyInterruptKind(intr, seg.name);
     state.segments[idx] = {
       type: 'interrupt',

@@ -89,8 +89,13 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"delta": e.Delta,
 		})
 	case *protocol.DoneEvent:
-		_, err := fmt.Fprint(w, "data: [DONE]\n\n")
-		return err
+		// The [DONE] sentinel is owned exclusively by [EncodeStream]
+		// on graceful channel close. Emitting it here as well would
+		// terminate the wire stream mid-flight (AI SDK clients stop
+		// reading at the first sentinel), silently dropping any
+		// post-Done frames the runner is about to write — notably the
+		// tool-input-available the HIL flow relies on.
+		return nil
 	case *protocol.ErrorEvent:
 		return writeData(w, map[string]any{
 			"type":  "error",

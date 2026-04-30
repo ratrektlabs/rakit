@@ -107,6 +107,37 @@ func TestEncodeStreamTerminatesWithDone(t *testing.T) {
 	}
 }
 
+// TestEncodeStreamEmitsSingleDone guards against a regression where a
+// runner-emitted DoneEvent and the channel-close handler each wrote a
+// `data: [DONE]\n\n` frame. AI SDK clients stop reading at the first
+// sentinel, so a duplicate emitted mid-stream silently drops every
+// subsequent frame (notably the spec-native tool-input-available the
+// HIL flow relies on).
+func TestEncodeStreamEmitsSingleDone(t *testing.T) {
+	p := aisdk.New()
+	events := make(chan protocol.Event, 4)
+	events <- &protocol.TextDeltaEvent{Delta: "hi"}
+	events <- &protocol.DoneEvent{}
+	events <- &protocol.ToolCallEndEvent{ToolCallID: "c1", Arguments: `{"x":1}`}
+	close(events)
+
+	var buf bytes.Buffer
+	if err := p.EncodeStream(context.Background(), &buf, events); err != nil {
+		t.Fatalf("EncodeStream: %v", err)
+	}
+
+	got := strings.Count(buf.String(), "data: [DONE]")
+	if got != 1 {
+		t.Fatalf("got %d [DONE] sentinels, want exactly 1:\n%s", got, buf.String())
+	}
+	if !strings.HasSuffix(strings.TrimRight(buf.String(), "\n"), "data: [DONE]") {
+		t.Fatalf("the single [DONE] sentinel must be the final frame:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"type":"tool-input-available"`) {
+		t.Fatalf("post-DoneEvent frames were dropped:\n%s", buf.String())
+	}
+}
+
 func TestEncodeError(t *testing.T) {
 	frames := parseSSE(encode(t, &protocol.ErrorEvent{Err: errors.New("oops")}))
 	if frames[0]["type"] != "error" || frames[0]["error"] != "oops" {
@@ -114,10 +145,15 @@ func TestEncodeError(t *testing.T) {
 	}
 }
 
-func TestEncodeDone(t *testing.T) {
+// TestEncodeDoneIsSilent guards the contract that [Encode] must not
+// emit the [DONE] sentinel on a [DoneEvent]. Channel close in
+// [EncodeStream] is the single authoritative end-of-stream signal; if
+// [Encode] also wrote [DONE], any frame emitted afterward by the runner
+// would be dropped by AI SDK clients.
+func TestEncodeDoneIsSilent(t *testing.T) {
 	s := encode(t, &protocol.DoneEvent{})
-	if !strings.Contains(s, "data: [DONE]") {
-		t.Fatalf("done frame missing [DONE] sentinel: %q", s)
+	if strings.Contains(s, "data: [DONE]") {
+		t.Fatalf("DoneEvent must not emit a [DONE] frame; got: %q", s)
 	}
 }
 

@@ -618,7 +618,14 @@ func convertEvent(e provider.Event) Event {
 			Result:     ev.Result,
 		}
 	case *provider.DoneProviderEvent:
-		return &DoneEvent{}
+		// The provider's done signal is an internal boundary: the
+		// runner still has post-stream work to emit (tool-input-end,
+		// tool results, [RunFinishedEvent] with optional interrupts).
+		// Returning nil here prevents the encoder from writing a
+		// terminal frame mid-stream — the channel close in
+		// [Encoder.EncodeStream] is the single authoritative
+		// end-of-stream signal.
+		return nil
 	case *provider.ErrorProviderEvent:
 		return &ErrorEvent{Err: ev.Err}
 	}

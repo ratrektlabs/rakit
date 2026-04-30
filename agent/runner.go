@@ -292,11 +292,19 @@ func (a *Agent) continueAgenticLoop(
 			CreatedAt: time.Now().UnixMilli(),
 		})
 
-		// Emit tool call arguments so clients can display request data
+		// Emit tool call arguments so clients can display request data.
+		// Each call produces an args frame followed by an end frame so
+		// encoders that distinguish "input streaming" from "input
+		// finalised" (e.g. the AI SDK's tool-input-available) can fire
+		// the right wire frame.
 		for _, tc := range responseToolCalls {
 			events <- &ToolCallArgsEvent{
 				ToolCallID: tc.ID,
 				Delta:      tc.Arguments,
+			}
+			events <- &ToolCallEndEvent{
+				ToolCallID: tc.ID,
+				Arguments:  tc.Arguments,
 			}
 		}
 

@@ -34,9 +34,57 @@ func TestEncodeRunLifecycle(t *testing.T) {
 	if end["type"] != "RUN_FINISHED" {
 		t.Fatalf("RUN_FINISHED: %+v", end)
 	}
+	if _, ok := end["outcome"]; ok {
+		t.Fatalf("RUN_FINISHED for a normal run must not include outcome: %+v", end)
+	}
 	errFrame := encodeOne(t, &protocol.RunErrorEvent{Message: "boom", Code: "INTERNAL"})
 	if errFrame["type"] != "RUN_ERROR" || errFrame["message"] != "boom" || errFrame["code"] != "INTERNAL" {
 		t.Fatalf("RUN_ERROR: %+v", errFrame)
+	}
+}
+
+// TestEncodeRunFinishedInterrupt asserts the AG-UI "Interrupt-Aware Run
+// Lifecycle" draft mapping: when the run pauses on interrupts, RUN_FINISHED
+// must carry outcome:"interrupt" and a populated interrupts[] using the
+// camelCase field names from the draft.
+func TestEncodeRunFinishedInterrupt(t *testing.T) {
+	frame := encodeOne(t, &protocol.RunFinishedEvent{
+		ThreadID: "t1",
+		RunID:    "r1",
+		Outcome:  protocol.OutcomeInterrupt,
+		Interrupts: []protocol.Interrupt{{
+			ID:         "intr-1",
+			Reason:     "tool_call",
+			Message:    "delete_item requires approval",
+			ToolCallID: "tc-1",
+			ResponseSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"approved": map[string]any{"type": "boolean"},
+				},
+			},
+			Metadata: map[string]any{"rakit.kind": "approval"},
+		}},
+	})
+	if frame["outcome"] != "interrupt" {
+		t.Fatalf("outcome=%v want interrupt", frame["outcome"])
+	}
+	intrs, ok := frame["interrupts"].([]any)
+	if !ok || len(intrs) != 1 {
+		t.Fatalf("interrupts: %+v", frame["interrupts"])
+	}
+	intr, _ := intrs[0].(map[string]any)
+	if intr["id"] != "intr-1" || intr["reason"] != "tool_call" || intr["toolCallId"] != "tc-1" {
+		t.Fatalf("interrupt frame missing required fields: %+v", intr)
+	}
+	if intr["message"] != "delete_item requires approval" {
+		t.Fatalf("interrupt message wrong: %+v", intr)
+	}
+	if _, ok := intr["responseSchema"].(map[string]any); !ok {
+		t.Fatalf("responseSchema missing/typed wrong: %+v", intr["responseSchema"])
+	}
+	if md, ok := intr["metadata"].(map[string]any); !ok || md["rakit.kind"] != "approval" {
+		t.Fatalf("metadata missing/wrong: %+v", intr["metadata"])
 	}
 }
 

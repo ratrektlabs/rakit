@@ -985,7 +985,12 @@ function parseSSEEvent(line) {
     // Tool call args (streaming)
     if (t === 'tool-input-delta' || t === 'TOOL_CALL_ARGS')
       return { kind: 'tool-args', id: evt.toolCallId, delta: evt.delta };
-    // Tool call end
+    // Tool call input finalised (AI SDK spec-native HIL signal — a
+    // dangling tool-input-available with no tool-output-available is the
+    // browser's cue to render an approval / client-side card).
+    if (t === 'tool-input-available')
+      return { kind: 'tool-input-available', id: evt.toolCallId, input: evt.input };
+    // Tool call end (AG-UI; AI SDK has no end frame)
     if (t === 'tool-input-end' || t === 'TOOL_CALL_END')
       return { kind: 'tool-end', id: evt.toolCallId };
     // Tool result
@@ -996,11 +1001,43 @@ function parseSSEEvent(line) {
       return { kind: 'text-start' };
     if (t === 'TEXT_MESSAGE_END')
       return { kind: 'text-end' };
+    // AG-UI run-finished. Carries the spec-native interrupts[] when the
+    // run paused on a human-in-the-loop checkpoint.
+    if (t === 'RUN_FINISHED')
+      return { kind: 'run-finished', outcome: evt.outcome || 'success', interrupts: evt.interrupts || [] };
     // Errors
     if (t === 'error' || t === 'RUN_ERROR')
       return { kind: 'error', text: evt.error || evt.message || 'Unknown error' };
   } catch(e) {}
   return null;
+}
+
+// HIL: render the approval / client-side card for a given interrupt
+// segment. The segment is mutated in place; the parent is re-rendered
+// outside this function.
+function renderInterruptCardHTML(seg) {
+  const kind = seg.kind || 'approval_required';
+  let prettyArgs = seg.args || '';
+  try { prettyArgs = JSON.stringify(JSON.parse(prettyArgs), null, 2); } catch(e) {}
+  let html = '<div class="tool-call-item" data-interrupt-id="' + escapeHtml(seg.interruptId || '') + '">';
+  html += '<div class="tc-header"><span style="color:var(--warning,#d97706)">&#9888;</span> ' + escapeHtml(seg.name || '') + '</div>';
+  if (prettyArgs) {
+    html += '<div class="tc-section"><div class="tc-label req">Request</div>'
+      + '<div class="tc-body">' + escapeHtml(prettyArgs) + '</div></div>';
+  }
+  html += '<div class="tc-section"><div class="tc-label">'
+    + (kind === 'client_side' ? 'Client tool — running in browser…' : 'Approval required')
+    + '</div>';
+  if (kind === 'client_side') {
+    html += '<div class="tc-body"><span class="spinner"></span> Resolving on the client…</div>';
+  } else {
+    html += '<div class="tc-body" style="display:flex;gap:8px;">'
+      + '<button class="btn sm" data-hil-action="approve" data-tool-id="' + escapeHtml(seg.id) + '">Approve</button>'
+      + '<button class="btn sm danger" data-hil-action="reject" data-tool-id="' + escapeHtml(seg.id) + '">Reject</button>'
+      + '</div>';
+  }
+  html += '</div></div>';
+  return html;
 }
 
 // Render the streaming bubble from current state
@@ -1011,10 +1048,194 @@ function renderStreamBubble(el, segments, scrollContainer) {
       html += renderMarkdown(seg.content);
     } else if (seg.type === 'tool') {
       html += renderToolCallHTML(seg.name, seg.args, seg.result, seg.status);
+    } else if (seg.type === 'interrupt') {
+      html += renderInterruptCardHTML(seg);
     }
   }
   el.innerHTML = html;
   if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+}
+
+// streamChat POSTs the body to /chat and folds stream events into the
+// shared (segments, toolMap) state used by the render loop. It returns
+// after the stream closes; the caller decides whether to handle any
+// resulting interrupts and re-call streamChat with a resume[] body.
+async function streamChat(body, streamDiv, state) {
+  const msgs = document.getElementById('chat-messages');
+  const resp = await fetch(API + '/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': getAcceptHeader()
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const errText = await resp.text();
+    streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(errText);
+    return { ok: false };
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let outcome = 'success';
+  let interrupts = [];
+
+  function getOrCreateTextSeg() {
+    if (state.currentTextSeg && state.segments[state.segments.length - 1] === state.currentTextSeg) {
+      return state.currentTextSeg;
+    }
+    state.currentTextSeg = { type: 'text', content: '' };
+    state.segments.push(state.currentTextSeg);
+    return state.currentTextSeg;
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n');
+    buffer = parts.pop();
+    for (const line of parts) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const evt = parseSSEEvent(trimmed);
+      if (!evt) continue;
+      switch (evt.kind) {
+        case 'delta': {
+          const seg = getOrCreateTextSeg();
+          seg.content += evt.text;
+          renderStreamBubble(streamDiv, state.segments, msgs);
+          break;
+        }
+        case 'tool-start': {
+          state.currentTextSeg = null;
+          const toolSeg = { type: 'tool', name: evt.name, id: evt.id, args: '', result: null, status: 'running' };
+          state.toolMap[evt.id] = state.segments.length;
+          state.segments.push(toolSeg);
+          renderStreamBubble(streamDiv, state.segments, msgs);
+          break;
+        }
+        case 'tool-args': {
+          const idx = state.toolMap[evt.id];
+          if (idx !== undefined) {
+            state.segments[idx].args += evt.delta;
+            renderStreamBubble(streamDiv, state.segments, msgs);
+          }
+          break;
+        }
+        case 'tool-input-available':
+        case 'tool-end': {
+          // Spec-native AI SDK signal for an in-progress tool whose
+          // input is finalised. Render is a no-op; we wait for either
+          // a tool-output-available (resolved) or RUN_FINISHED with an
+          // interrupt referencing this toolCallId (paused).
+          break;
+        }
+        case 'tool-result': {
+          const idx = state.toolMap[evt.id];
+          if (idx !== undefined) {
+            state.segments[idx].result = evt.output;
+            state.segments[idx].status = 'done';
+          } else {
+            state.segments.push({ type: 'tool', name: '(tool)', id: evt.id, args: '', result: evt.output, status: 'done' });
+            state.currentTextSeg = null;
+          }
+          renderStreamBubble(streamDiv, state.segments, msgs);
+          break;
+        }
+        case 'run-finished': {
+          outcome = evt.outcome;
+          interrupts = evt.interrupts || [];
+          break;
+        }
+        case 'error': {
+          state.currentTextSeg = null;
+          state.segments.push({ type: 'text', content: '\n[Error: ' + evt.text + ']' });
+          renderStreamBubble(streamDiv, state.segments, msgs);
+          break;
+        }
+        case 'text-start': {
+          state.currentTextSeg = null;
+          break;
+        }
+      }
+    }
+  }
+  return { ok: true, outcome, interrupts };
+}
+
+// classifyInterruptKind picks an "approval" vs "client_side" rendering
+// strategy. AG-UI carries this in [Interrupt.metadata]["rakit.kind"]; the
+// AI SDK has no equivalent so we fall back to the demo-known tool name.
+function classifyInterruptKind(intr, toolName) {
+  if (intr && intr.metadata && intr.metadata['rakit.kind']) {
+    return intr.metadata['rakit.kind'];
+  }
+  if (toolName === 'browser_time') return 'client_side';
+  return 'approval_required';
+}
+
+// promoteInterruptSegments converts paused tool segments to interrupt
+// segments so the user sees an approval / client-side card instead of an
+// indefinite "running" spinner.
+function promoteInterruptSegments(state, interrupts) {
+  // Build toolCallId -> Interrupt map. AG-UI-only: AI SDK doesn't carry
+  // this structured frame, so we synthesize one entry per pending tool.
+  const byTool = {};
+  for (const intr of interrupts) {
+    if (intr && intr.toolCallId) byTool[intr.toolCallId] = intr;
+  }
+  const pending = [];
+  for (const id of Object.keys(state.toolMap)) {
+    const idx = state.toolMap[id];
+    const seg = state.segments[idx];
+    if (!seg || seg.type !== 'tool' || seg.status !== 'running') continue;
+    const intr = byTool[id];
+    const kind = classifyInterruptKind(intr, seg.name);
+    state.segments[idx] = {
+      type: 'interrupt',
+      id: id,
+      name: seg.name,
+      args: seg.args,
+      kind: kind,
+      interruptId: intr ? intr.id : '',
+      toolName: seg.name
+    };
+    pending.push(state.segments[idx]);
+  }
+  return pending;
+}
+
+// resolveClientSide auto-fulfils a client-side interrupt with a tool-name
+// specific synthetic result. Browser-only data goes here (timezone, DOM
+// state, etc.); for anything else the FE prompts the user.
+function resolveClientSide(seg) {
+  if (seg.toolName === 'browser_time') {
+    const now = new Date();
+    return {
+      iso: now.toISOString(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      epochMs: now.getTime()
+    };
+  }
+  return { error: 'no client-side handler registered for ' + seg.toolName };
+}
+
+// waitForApproval returns a Promise that resolves with the user's choice
+// for a single approval interrupt. The buttons are wired by data attribute
+// so we can re-render the bubble freely without losing handlers.
+function waitForApproval(streamDiv, seg) {
+  return new Promise((resolve) => {
+    const onClick = (ev) => {
+      const btn = ev.target.closest('[data-hil-action]');
+      if (!btn) return;
+      if (btn.getAttribute('data-tool-id') !== seg.id) return;
+      streamDiv.removeEventListener('click', onClick);
+      resolve(btn.getAttribute('data-hil-action'));
+    };
+    streamDiv.addEventListener('click', onClick);
+  });
 }
 
 async function sendMessage() {
@@ -1029,7 +1250,6 @@ async function sendMessage() {
   streaming = true;
   document.getElementById('send-btn').disabled = true;
 
-  // Create a streaming assistant message bubble
   const msgs = document.getElementById('chat-messages');
   const empty = msgs.querySelector('.empty-state');
   if (empty) empty.remove();
@@ -1039,116 +1259,55 @@ async function sendMessage() {
   msgs.appendChild(streamDiv);
   msgs.scrollTop = msgs.scrollHeight;
 
-  // segments: [{type:'text', content:''}, {type:'tool', name, id, args, result, status}]
-  let segments = [];
-  let currentTextSeg = null;
-  // Map tool call ID -> segment index for updating
-  let toolMap = {};
-
-  function getOrCreateTextSeg() {
-    if (currentTextSeg && segments[segments.length - 1] === currentTextSeg) return currentTextSeg;
-    currentTextSeg = { type: 'text', content: '' };
-    segments.push(currentTextSeg);
-    return currentTextSeg;
-  }
+  const state = { segments: [], toolMap: {}, currentTextSeg: null };
 
   try {
-    const body = { message: msg, userId: 'default' };
+    let body = { message: msg, userId: 'default' };
     if (currentSession) body.sessionId = currentSession;
 
-    const resp = await fetch(API + '/chat', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': getAcceptHeader()
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      streamDiv.innerHTML = '<div class="role-label">error</div>' + escapeHtml(errText);
-      return;
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const result = await streamChat(body, streamDiv, state);
+      if (!result.ok) return;
 
-      buffer += decoder.decode(value, { stream: true });
+      const pending = promoteInterruptSegments(state, result.interrupts);
+      if (pending.length === 0) break;
+      renderStreamBubble(streamDiv, state.segments, msgs);
 
-      const parts = buffer.split('\n');
-      buffer = parts.pop();
-
-      for (const line of parts) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        const evt = parseSSEEvent(trimmed);
-        if (!evt) continue;
-
-        switch (evt.kind) {
-          case 'delta': {
-            const seg = getOrCreateTextSeg();
-            seg.content += evt.text;
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'tool-start': {
-            currentTextSeg = null; // break text segment so next text goes after tool
-            const toolSeg = { type: 'tool', name: evt.name, id: evt.id, args: '', result: null, status: 'running' };
-            toolMap[evt.id] = segments.length;
-            segments.push(toolSeg);
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'tool-args': {
-            const idx = toolMap[evt.id];
-            if (idx !== undefined) {
-              segments[idx].args += evt.delta;
-              renderStreamBubble(streamDiv, segments, msgs);
-            }
-            break;
-          }
-          case 'tool-end': {
-            // no-op, wait for result
-            break;
-          }
-          case 'tool-result': {
-            const idx = toolMap[evt.id];
-            if (idx !== undefined) {
-              segments[idx].result = evt.output;
-              segments[idx].status = 'done';
-            } else {
-              // Result without a matching start — find by last unresolved or create
-              const toolSeg = { type: 'tool', name: '(tool)', id: evt.id, args: '', result: evt.output, status: 'done' };
-              segments.push(toolSeg);
-              currentTextSeg = null;
-            }
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'error': {
-            currentTextSeg = null;
-            segments.push({ type: 'text', content: '\n[Error: ' + evt.text + ']' });
-            renderStreamBubble(streamDiv, segments, msgs);
-            break;
-          }
-          case 'text-start': {
-            // New text message in agentic loop iteration — start fresh text segment
-            currentTextSeg = null;
-            break;
-          }
+      // Resolve every pending interrupt before re-entering the loop.
+      // Per the AG-UI draft, a resume[] payload must address every
+      // open interrupt — partial resumes produce RUN_ERROR.
+      const resume = [];
+      for (const seg of pending) {
+        if (seg.kind === 'client_side') {
+          const output = resolveClientSide(seg);
+          resume.push({
+            interruptId: seg.interruptId,
+            status: 'resolved',
+            payload: { output: output }
+          });
+          // Reflect resolution visually so the user sees the swap from
+          // "running on client…" to a normal completed tool card.
+          const idx = state.toolMap[seg.id];
+          state.segments[idx] = { type: 'tool', name: seg.name, id: seg.id, args: seg.args, result: JSON.stringify(output), status: 'done' };
+        } else {
+          const choice = await waitForApproval(streamDiv, seg);
+          resume.push({
+            interruptId: seg.interruptId,
+            status: 'resolved',
+            payload: { approved: choice === 'approve' }
+          });
+          const idx = state.toolMap[seg.id];
+          state.segments[idx] = { type: 'tool', name: seg.name, id: seg.id, args: seg.args, result: choice === 'approve' ? '(approved — running…)' : '(rejected by user)', status: choice === 'approve' ? 'running' : 'done' };
         }
       }
+      renderStreamBubble(streamDiv, state.segments, msgs);
+
+      body = { sessionId: currentSession, userId: 'default', resume };
+      // The session id is set on the first turn; reuse it.
+      if (!body.sessionId) body.sessionId = state.sessionId;
     }
 
-    // If nothing was rendered, remove the empty bubble
-    if (segments.length === 0) {
+    if (state.segments.length === 0) {
       streamDiv.remove();
     }
 

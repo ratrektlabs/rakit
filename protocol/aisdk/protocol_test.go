@@ -71,13 +71,39 @@ func TestEncodeToolLifecycle(t *testing.T) {
 	if args[0]["type"] != "tool-input-delta" || args[0]["delta"] != `{"x":1}` {
 		t.Fatalf("args frame: %+v", args[0])
 	}
+	// ToolCallEnd carries the parsed input through the spec-native
+	// tool-input-available frame. A dangling tool-input-available with no
+	// follow-up tool-output-available is the AI SDK signal for an
+	// approval / client-side interrupt.
+	end := parseSSE(encode(t, &protocol.ToolCallEndEvent{ToolCallID: "c1", Arguments: `{"x":1}`}))
+	if end[0]["type"] != "tool-input-available" || end[0]["toolCallId"] != "c1" {
+		t.Fatalf("end frame: %+v", end[0])
+	}
+	input, ok := end[0]["input"].(map[string]any)
+	if !ok || input["x"] != float64(1) {
+		t.Fatalf("end frame input not parsed: %+v", end[0]["input"])
+	}
 	result := parseSSE(encode(t, &protocol.ToolResultEvent{ToolCallID: "c1", Result: "3"}))
 	if result[0]["type"] != "tool-output-available" || result[0]["output"] != "3" {
 		t.Fatalf("result frame: %+v", result[0])
 	}
-	// ToolCallEnd is intentionally suppressed for AI SDK.
-	if s := encode(t, &protocol.ToolCallEndEvent{ToolCallID: "c1"}); s != "" {
-		t.Fatalf("ToolCallEnd should emit nothing, got %q", s)
+}
+
+// TestEncodeStreamTerminatesWithDone guards the AI SDK contract: every
+// stream must end with a `data: [DONE]\n\n` sentinel so browser clients
+// stop reading. Previously rakit closed the channel without writing the
+// sentinel, leaving clients to time out.
+func TestEncodeStreamTerminatesWithDone(t *testing.T) {
+	p := aisdk.New()
+	events := make(chan protocol.Event, 1)
+	events <- &protocol.TextDeltaEvent{Delta: "hi"}
+	close(events)
+	var buf bytes.Buffer
+	if err := p.EncodeStream(context.Background(), &buf, events); err != nil {
+		t.Fatalf("EncodeStream: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimRight(buf.String(), "\n"), "data: [DONE]") {
+		t.Fatalf("stream did not end with [DONE] sentinel:\n%s", buf.String())
 	}
 }
 

@@ -40,6 +40,20 @@ const (
 // callers keep compiling.
 type Protocol = agent.Encoder
 
+// Interrupt re-exports [agent.Interrupt] for encoders that need to format
+// interrupt frames without depending on the agent package directly.
+type Interrupt = agent.Interrupt
+
+// RunOutcome re-exports [agent.RunOutcome].
+type RunOutcome = agent.RunOutcome
+
+// Run outcome constants re-exported from the agent package.
+const (
+	OutcomeSuccess   = agent.OutcomeSuccess
+	OutcomeInterrupt = agent.OutcomeInterrupt
+	OutcomeError     = agent.OutcomeError
+)
+
 // Event struct re-exports.
 type (
 	BaseEvent                    = agent.BaseEvent

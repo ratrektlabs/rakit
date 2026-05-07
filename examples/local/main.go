@@ -22,6 +22,7 @@ import (
 	blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
 	"github.com/ratrektlabs/rakit/storage/metadata"
 	metaSQLite "github.com/ratrektlabs/rakit/storage/metadata/sqlite"
+	"github.com/ratrektlabs/rakit/tool"
 )
 
 //go:embed index.html
@@ -112,17 +113,36 @@ func main() {
 	reg.SetDefault(aisdk.New())
 
 	// Agent
+	//
+	// `delete_item` is gated by an [agent.ApprovalPolicy] so the LLM cannot
+	// invoke it without explicit human approval — the runner raises an
+	// AG-UI interrupt and pauses the run until the FE sends a resume[].
 	a := agent.New(
 		agent.WithProvider(prov),
 		agent.WithProtocol(aisdk.New()),
 		agent.WithStore(store),
 		agent.WithFS(blobStore),
+		agent.WithApprovalPolicy(agent.RequireFor("delete_item")),
 	)
 
 	// Register the spawn_agent tool so the LLM can delegate subtasks
 	a.Tools.Register(a.SpawnAgentTool(reg.Default()))
 
-	// Register a demo skill
+	// browser_time is a client-side tool: the runner emits the tool call
+	// and then pauses on a tool_call interrupt. The browser supplies the
+	// result via /chat resume[]. This is the spec-native AI SDK
+	// "tool with no execute" pattern wrapped behind the [agent.ClientSide]
+	// marker interface.
+	a.Tools.Register(&clientSideTool{
+		name:        "browser_time",
+		description: "Return the user's wall-clock time and timezone (executes in the browser).",
+		parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	})
+
+	// Register demo skills.
 	_ = a.Skills.Register(ctx, &skill.Definition{
 		Name:         "echo",
 		Description:  "Echoes back the input",
@@ -136,6 +156,29 @@ func main() {
 					"text": map[string]any{"type": "string"},
 				},
 				"required": []string{"text"},
+			},
+			Handler:       "http",
+			Endpoint:      "https://httpbin.org/post",
+			ResponseField: "json",
+		}},
+	})
+
+	// delete_item exists so the approval-gated HIL flow has something
+	// concrete to demonstrate. It hits httpbin so the flow is visible
+	// end-to-end without any external state.
+	_ = a.Skills.Register(ctx, &skill.Definition{
+		Name:         "danger_zone",
+		Description:  "Destructive operations that require human approval before running.",
+		Instructions: "Use delete_item when the user asks to delete something. The framework will pause for approval before the tool runs.",
+		Tools: []skill.ToolDef{{
+			Name:        "delete_item",
+			Description: "Permanently delete an item by id (requires human approval).",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "string"},
+				},
+				"required": []string{"id"},
 			},
 			Handler:       "http",
 			Endpoint:      "https://httpbin.org/post",
@@ -158,11 +201,21 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", p.ContentType())
+		// Surface the session id in a header so clients that didn't
+		// pre-create a session can still address the same session on
+		// the resume turn. Both AG-UI (threadId on RUN_STARTED) and
+		// AI SDK (no run lifecycle frame) callers benefit from this.
+		w.Header().Set("Access-Control-Expose-Headers", "X-Session-Id")
 
+		// The single /chat envelope carries either a fresh user turn
+		// (Message) or a resume of one or more open interrupts
+		// (Resume). This matches AG-UI contract rule 2 — there is no
+		// rakit-specific /chat/resume.
 		var req struct {
-			Message   string `json:"message"`
-			SessionID string `json:"sessionId"`
-			UserID    string `json:"userId"`
+			Message   string         `json:"message"`
+			SessionID string         `json:"sessionId"`
+			UserID    string         `json:"userId"`
+			Resume    []resumeInWire `json:"resume"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -174,8 +227,16 @@ func main() {
 			req.UserID = "default"
 		}
 
-		// Create session if not provided
+		isResume := len(req.Resume) > 0
+
+		// Create session if not provided. A resume turn must reference
+		// an existing session — there are no open interrupts on a new
+		// session.
 		if req.SessionID == "" {
+			if isResume {
+				http.Error(w, "resume requires sessionId", http.StatusBadRequest)
+				return
+			}
 			sess, err := a.CreateSessionForUser(r.Context(), req.UserID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -183,10 +244,29 @@ func main() {
 			}
 			req.SessionID = sess.ID
 		}
+		w.Header().Set("X-Session-Id", req.SessionID)
 
-		events, err := a.RunWithSession(r.Context(), req.SessionID, req.Message, p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		var (
+			events <-chan agent.Event
+			runErr error
+		)
+		if isResume {
+			// Both AG-UI and AI SDK callers route resumes through this
+			// envelope. AG-UI carries interruptId per spec; the AI SDK
+			// has no interrupt concept on the wire, so its callers
+			// supply toolCallId — we resolve it to the open interrupt
+			// here so [Agent.Resume] gets a uniform list.
+			inputs, resolveErr := resolveResumeInputs(r.Context(), a, req.SessionID, req.Resume)
+			if resolveErr != nil {
+				http.Error(w, resolveErr.Error(), http.StatusBadRequest)
+				return
+			}
+			events, runErr = a.Resume(r.Context(), req.SessionID, inputs, p)
+		} else {
+			events, runErr = a.RunWithSession(r.Context(), req.SessionID, req.Message, p)
+		}
+		if runErr != nil {
+			http.Error(w, runErr.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -233,6 +313,82 @@ func (lw *loggingWriter) WriteHeader(code int) {
 	lw.status = code
 	lw.ResponseWriter.WriteHeader(code)
 }
+
+// resumeInWire is the JSON shape the FE sends to resolve open interrupts.
+//
+// It mirrors AG-UI's RunAgentInput.resume[] verbatim. AI SDK callers, which
+// have no interrupt concept on the wire, supply [ToolCallID] instead — the
+// server resolves it to the matching open [agent.Interrupt] before calling
+// [agent.Agent.Resume].
+type resumeInWire struct {
+	InterruptID string `json:"interruptId"`
+	ToolCallID  string `json:"toolCallId"`
+	Status      string `json:"status"`
+	Payload     any    `json:"payload"`
+}
+
+// resolveResumeInputs translates the wire-shape resume entries into the
+// [agent.ResumeInput] slice the agent expects, mapping toolCallId to the
+// matching open interruptId for AI SDK callers.
+func resolveResumeInputs(ctx context.Context, a *agent.Agent, sessionID string, in []resumeInWire) ([]agent.ResumeInput, error) {
+	sess, err := a.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load session: %w", err)
+	}
+	if sess == nil {
+		return nil, fmt.Errorf("session %q not found", sessionID)
+	}
+	byTool := make(map[string]string, len(sess.OpenInterrupts))
+	for _, intr := range sess.OpenInterrupts {
+		if intr.ToolCallID != "" {
+			byTool[intr.ToolCallID] = intr.ID
+		}
+	}
+	out := make([]agent.ResumeInput, len(in))
+	for i, ri := range in {
+		intrID := ri.InterruptID
+		if intrID == "" && ri.ToolCallID != "" {
+			intrID = byTool[ri.ToolCallID]
+		}
+		if intrID == "" {
+			return nil, fmt.Errorf("resume entry %d missing interruptId/toolCallId", i)
+		}
+		status := agent.ResumeResolved
+		if ri.Status == "cancelled" {
+			status = agent.ResumeCancelled
+		}
+		out[i] = agent.ResumeInput{
+			InterruptID: intrID,
+			Status:      status,
+			Payload:     ri.Payload,
+		}
+	}
+	return out, nil
+}
+
+// clientSideTool is a tool the runner advertises to the LLM but never
+// executes inline. The [ClientSide] marker tells the runner to raise an
+// interrupt instead, so the FE can supply the result.
+type clientSideTool struct {
+	name        string
+	description string
+	parameters  map[string]any
+}
+
+func (t *clientSideTool) Name() string        { return t.name }
+func (t *clientSideTool) Description() string { return t.description }
+func (t *clientSideTool) Parameters() any     { return t.parameters }
+
+// Execute is unreachable in normal use — the runner intercepts client-side
+// tools before invoking Execute. We keep a defensive implementation so a
+// misconfigured agent (no [ClientSide] marker honored) surfaces a clear
+// error instead of silently returning empty output.
+func (t *clientSideTool) Execute(ctx context.Context, input map[string]any) (*tool.Result, error) {
+	return nil, fmt.Errorf("%s is a client-side tool and cannot be executed in-process", t.name)
+}
+
+// ClientSide marks this tool as client-executed.
+func (t *clientSideTool) ClientSide() bool { return true }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

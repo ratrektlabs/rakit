@@ -109,11 +109,23 @@ func (p *Protocol) Encode(w io.Writer, event protocol.Event) error {
 			"messageId": e.MessageID,
 		})
 	case *protocol.RunFinishedEvent:
-		return writeSSE(w, map[string]any{
+		frame := map[string]any{
 			"type":     "RUN_FINISHED",
 			"threadId": e.ThreadID,
 			"runId":    e.RunID,
-		})
+		}
+		// Per the AG-UI "Interrupt-Aware Run Lifecycle" draft, an
+		// interrupted run terminates with RUN_FINISHED carrying
+		// outcome:"interrupt" and a populated interrupts[]. Successful
+		// runs omit both fields for back-compat with stable AG-UI
+		// clients.
+		if e.Outcome == protocol.OutcomeInterrupt {
+			frame["outcome"] = "interrupt"
+			frame["interrupts"] = interruptsToWire(e.Interrupts)
+		} else if e.Result != nil {
+			frame["result"] = e.Result
+		}
+		return writeSSE(w, frame)
 	case *protocol.RunErrorEvent:
 		return writeSSE(w, map[string]any{
 			"type":    "RUN_ERROR",
@@ -164,4 +176,34 @@ func writeSSE(w io.Writer, data map[string]any) error {
 	}
 	_, err = fmt.Fprintf(w, "data: %s\n\n", b)
 	return err
+}
+
+// interruptsToWire converts the agent-level [agent.Interrupt] slice into the
+// JSON shape defined by the AG-UI "Interrupt-Aware Run Lifecycle" draft.
+//
+// Field names match the draft verbatim (camelCase). Zero-value fields are
+// omitted so the wire output matches the spec's optionality.
+func interruptsToWire(in []protocol.Interrupt) []map[string]any {
+	out := make([]map[string]any, 0, len(in))
+	for _, intr := range in {
+		frame := map[string]any{
+			"id":      intr.ID,
+			"reason":  intr.Reason,
+			"message": intr.Message,
+		}
+		if intr.ToolCallID != "" {
+			frame["toolCallId"] = intr.ToolCallID
+		}
+		if len(intr.ResponseSchema) > 0 {
+			frame["responseSchema"] = intr.ResponseSchema
+		}
+		if !intr.ExpiresAt.IsZero() {
+			frame["expiresAt"] = intr.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00")
+		}
+		if len(intr.Metadata) > 0 {
+			frame["metadata"] = intr.Metadata
+		}
+		out = append(out, frame)
+	}
+	return out
 }

@@ -144,8 +144,14 @@ type ToolCallArgsEvent struct {
 func (e *ToolCallArgsEvent) Type() EventType { return EventToolCallArgs }
 
 // ToolCallEndEvent marks the end of a tool call's argument stream.
+//
+// [Arguments] carries the full JSON arguments object the provider produced
+// for the call. Encoders that emit a "tool input available" frame at this
+// boundary (notably the AI SDK) can forward it directly; encoders that only
+// care about start/delta (notably AG-UI) can ignore it.
 type ToolCallEndEvent struct {
 	ToolCallID string
+	Arguments  string
 }
 
 // Type returns the event type.

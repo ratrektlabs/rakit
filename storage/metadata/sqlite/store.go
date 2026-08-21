@@ -77,6 +77,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			parent_session_id TEXT DEFAULT '',
 			state             TEXT DEFAULT '{}',
 			open_interrupts   TEXT DEFAULT '[]',
+			revision          INTEGER NOT NULL DEFAULT 1,
 			created_at        INTEGER NOT NULL,
 			updated_at        INTEGER NOT NULL
 		)`,
@@ -143,6 +144,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN open_interrupts TEXT DEFAULT '[]'`,
+		`ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'http'`,
 	}
 	for _, a := range alters {
@@ -162,8 +164,8 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 	state := "{}"
 
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (id, agent_id, user_id, state, open_interrupts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		id, agentID, userID, state, "[]", now, now,
+		"INSERT INTO sessions (id, agent_id, user_id, state, open_interrupts, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		id, agentID, userID, state, "[]", 1, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: create session: %w", err)
@@ -176,6 +178,7 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 		Messages:       []metadata.Message{},
 		State:          map[string]any{},
 		OpenInterrupts: []metadata.Interrupt{},
+		Revision:       1,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}, nil
@@ -184,17 +187,22 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, error) {
 	var sess metadata.Session
 	var stateJSON, interruptsJSON string
+	var revision int64
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, state, open_interrupts, created_at, updated_at FROM sessions WHERE id = ?",
+		"SELECT id, agent_id, user_id, parent_session_id, state, open_interrupts, revision, created_at, updated_at FROM sessions WHERE id = ?",
 		id,
-	).Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &stateJSON, &interruptsJSON, &sess.CreatedAt, &sess.UpdatedAt)
+	).Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &stateJSON, &interruptsJSON, &revision, &sess.CreatedAt, &sess.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: get session %q: %w", id, err)
 	}
+	if revision < 0 {
+		return nil, fmt.Errorf("sqlite: get session %q: invalid revision %d", id, revision)
+	}
+	sess.Revision = uint64(revision)
 
 	if err := json.Unmarshal([]byte(stateJSON), &sess.State); err != nil {
 		sess.State = map[string]any{}
@@ -216,8 +224,16 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 }
 
 func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error {
+	if sess == nil {
+		return fmt.Errorf("sqlite: update session: nil session")
+	}
+	const maxInt64 uint64 = 1<<63 - 1
+	if sess.Revision >= maxInt64 {
+		return fmt.Errorf("sqlite: update session %q: revision overflow", sess.ID)
+	}
+	expectedRevision := int64(sess.Revision)
+	nextRevision := expectedRevision + 1
 	now := time.Now().UnixMilli()
-	sess.UpdatedAt = now
 
 	stateJSON, err := json.Marshal(sess.State)
 	if err != nil {
@@ -237,33 +253,88 @@ func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error
 		return fmt.Errorf("sqlite: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+	var createdAt, currentUpdatedAt int64
+	if err := tx.QueryRowContext(ctx, "SELECT created_at, updated_at FROM sessions WHERE id = ?", sess.ID).Scan(&createdAt, &currentUpdatedAt); err == sql.ErrNoRows {
+		return fmt.Errorf("sqlite: update session %q: not found", sess.ID)
+	} else if err != nil {
+		return fmt.Errorf("sqlite: inspect session %q: %w", sess.ID, err)
+	}
+	if now <= currentUpdatedAt {
+		if currentUpdatedAt == int64(^uint64(0)>>1) {
+			return fmt.Errorf("sqlite: update session %q: updatedAt overflow", sess.ID)
+		}
+		now = currentUpdatedAt + 1
+	}
 
-	_, err = tx.ExecContext(ctx,
-		"UPDATE sessions SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?, open_interrupts = ?, updated_at = ? WHERE id = ?",
-		sess.AgentID, sess.UserID, sess.ParentSessionID, string(stateJSON), string(interruptsJSON), now, sess.ID,
+	result, err := tx.ExecContext(ctx,
+		"UPDATE sessions SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?, open_interrupts = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?",
+		sess.AgentID, sess.UserID, sess.ParentSessionID, string(stateJSON), string(interruptsJSON), nextRevision, now, sess.ID, expectedRevision,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: update session: %w", err)
 	}
-
-	// Delete old messages and re-insert.
-	_, err = tx.ExecContext(ctx, "DELETE FROM session_messages WHERE session_id = ?", sess.ID)
+	updated, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("sqlite: delete old messages: %w", err)
+		return fmt.Errorf("sqlite: inspect session update: %w", err)
 	}
-
-	for _, msg := range sess.Messages {
-		tcJSON, _ := json.Marshal(msg.ToolCalls)
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO session_messages (id, session_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			msg.ID, sess.ID, msg.Role, msg.Content, string(tcJSON), msg.CreatedAt,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: insert message: %w", err)
+	if updated == 0 {
+		var exists int
+		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", sess.ID).Scan(&exists); err == sql.ErrNoRows {
+			return fmt.Errorf("sqlite: update session %q: not found", sess.ID)
+		} else if err != nil {
+			return fmt.Errorf("sqlite: inspect session %q: %w", sess.ID, err)
+		}
+		return fmt.Errorf("sqlite: update session %q: %w (stored revision differs)", sess.ID, metadata.ErrSessionConflict)
+	}
+	if len(sess.Messages) == 0 {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM session_messages WHERE session_id = ?", sess.ID); err != nil {
+			return fmt.Errorf("sqlite: delete old messages: %w", err)
+		}
+	} else {
+		placeholders := make([]byte, 0, len(sess.Messages)*2)
+		args := make([]any, 0, len(sess.Messages)+1)
+		args = append(args, sess.ID)
+		for i, msg := range sess.Messages {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args = append(args, msg.ID)
+		}
+		deleteSQL := "DELETE FROM session_messages WHERE session_id = ? AND id NOT IN (" + string(placeholders) + ")"
+		if _, err := tx.ExecContext(ctx, deleteSQL, args...); err != nil {
+			return fmt.Errorf("sqlite: delete removed messages: %w", err)
 		}
 	}
 
-	return tx.Commit()
+	for _, msg := range sess.Messages {
+		tcJSON, err := json.Marshal(msg.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("sqlite: marshal tool calls for message %q: %w", msg.ID, err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO session_messages (id, session_id, role, content, tool_calls, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			 session_id = excluded.session_id,
+			 role = excluded.role,
+			 content = excluded.content,
+			 tool_calls = excluded.tool_calls,
+			 created_at = excluded.created_at`,
+			msg.ID, sess.ID, msg.Role, msg.Content, string(tcJSON), msg.CreatedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("sqlite: upsert message %q: %w", msg.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	sess.Revision = uint64(nextRevision)
+	sess.CreatedAt = createdAt
+	sess.UpdatedAt = now
+	return nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
@@ -276,7 +347,7 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 
 func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC",
+		"SELECT id, agent_id, user_id, parent_session_id, revision, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC",
 		agentID,
 	)
 	if err != nil {
@@ -287,9 +358,14 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 	var sessions []*metadata.Session
 	for rows.Next() {
 		var sess metadata.Session
-		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		var revision int64
+		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &revision, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("sqlite: scan session: %w", err)
 		}
+		if revision < 0 {
+			return nil, fmt.Errorf("sqlite: scan session: invalid revision %d", revision)
+		}
+		sess.Revision = uint64(revision)
 		sess.Messages = []metadata.Message{}
 		sessions = append(sessions, &sess)
 	}
@@ -301,7 +377,7 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 
 func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, created_at, updated_at FROM sessions WHERE agent_id = ? AND user_id = ? ORDER BY updated_at DESC",
+		"SELECT id, agent_id, user_id, parent_session_id, revision, created_at, updated_at FROM sessions WHERE agent_id = ? AND user_id = ? ORDER BY updated_at DESC",
 		agentID, userID,
 	)
 	if err != nil {
@@ -312,9 +388,14 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 	var sessions []*metadata.Session
 	for rows.Next() {
 		var sess metadata.Session
-		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		var revision int64
+		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &revision, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("sqlite: scan session: %w", err)
 		}
+		if revision < 0 {
+			return nil, fmt.Errorf("sqlite: scan session: invalid revision %d", revision)
+		}
+		sess.Revision = uint64(revision)
 		sess.Messages = []metadata.Message{}
 		sessions = append(sessions, &sess)
 	}

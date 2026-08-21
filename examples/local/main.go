@@ -21,6 +21,7 @@ import (
 	"github.com/ratrektlabs/rakit/skill"
 	blobLocal "github.com/ratrektlabs/rakit/storage/blob/local"
 	"github.com/ratrektlabs/rakit/storage/metadata"
+	metaJSONL "github.com/ratrektlabs/rakit/storage/metadata/jsonl"
 	metaSQLite "github.com/ratrektlabs/rakit/storage/metadata/sqlite"
 	"github.com/ratrektlabs/rakit/tool"
 )
@@ -86,12 +87,34 @@ func loadProviderConfig(ctx context.Context, store metadata.Store) (provider.Pro
 func main() {
 	ctx := context.Background()
 
-	// Storage (local — no external services required)
-	store, err := metaSQLite.NewStore(ctx, "./data/agent.db")
-	if err != nil {
-		log.Fatalf("Failed to create SQLite store: %v", err)
+	// Storage (local — no external services required). SQLite remains the
+	// default; set RAKIT_METADATA_STORE=jsonl to use a Claude Code-style
+	// workspace-scoped JSONL transcript store instead.
+	var store metadata.Store
+	var closeStore func() error
+	if os.Getenv("RAKIT_METADATA_STORE") == "jsonl" {
+		workspace, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to resolve JSONL workspace: %v", err)
+		}
+		jsonlStore, err := metaJSONL.NewStore(ctx, metaJSONL.Config{
+			RootDir:       envOr("RAKIT_JSONL_ROOT", "./data/jsonl"),
+			WorkspacePath: workspace,
+		})
+		if err != nil {
+			log.Fatalf("Failed to create JSONL store: %v", err)
+		}
+		store = jsonlStore
+		closeStore = jsonlStore.Close
+	} else {
+		sqliteStore, err := metaSQLite.NewStore(ctx, "./data/agent.db")
+		if err != nil {
+			log.Fatalf("Failed to create SQLite store: %v", err)
+		}
+		store = sqliteStore
+		closeStore = sqliteStore.Close
 	}
-	defer store.Close()
+	defer closeStore()
 
 	blobStore, err := blobLocal.New("./data/workspace")
 	if err != nil {

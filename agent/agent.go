@@ -186,7 +186,7 @@ func (a *Agent) CreateSessionForUser(ctx context.Context, userID string) (*metad
 	}
 	if a.parentSessionID != "" {
 		sess.ParentSessionID = a.parentSessionID
-		if err := a.Store.UpdateSession(ctx, sess); err != nil {
+		if err := a.persistSession(ctx, sess); err != nil {
 			return nil, err
 		}
 	}

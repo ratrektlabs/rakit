@@ -125,7 +125,7 @@ func providerToolCallsToRecords(tcs []provider.ToolCall) []metadata.ToolCallReco
 			ID:        tc.ID,
 			Name:      tc.Name,
 			Arguments: tc.Arguments,
-			Status:    "completed",
+			Status:    "pending",
 		}
 	}
 	return records

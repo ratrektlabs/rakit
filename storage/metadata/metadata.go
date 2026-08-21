@@ -1,21 +1,32 @@
 package metadata
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrSessionConflict reports that a session update was based on an older
+// session revision than the one currently stored.
+var ErrSessionConflict = errors.New("metadata: session revision conflict")
 
 // Session represents a conversation session.
 type Session struct {
 	ID              string         `json:"id" firestore:"id" bson:"id"`
-	AgentID         string         `json:"agentId" firestore:"agentId" bson:"agentid"`
-	UserID          string         `json:"userId" firestore:"userId" bson:"userid"`
-	ParentSessionID string         `json:"parentSessionId,omitempty" firestore:"parentSessionId" bson:"parentsessionid,omitempty"`
+	AgentID         string         `json:"agentId" firestore:"agentID" bson:"agentid"`
+	UserID          string         `json:"userId" firestore:"userID" bson:"userid"`
+	ParentSessionID string         `json:"parentSessionId,omitempty" firestore:"parentSessionID" bson:"parentsessionid,omitempty"`
 	Messages        []Message      `json:"messages" firestore:"messages" bson:"messages"`
 	State           map[string]any `json:"state" firestore:"state" bson:"state"`
 	// OpenInterrupts is the set of unresolved interrupts raised by the most
 	// recent run on this session. A non-empty slice means a resume is
 	// required before any new user input can be processed.
 	OpenInterrupts []Interrupt `json:"openInterrupts,omitempty" firestore:"openInterrupts" bson:"openinterrupts,omitempty"`
-	CreatedAt      int64       `json:"createdAt" firestore:"createdAt" bson:"createdat"`
-	UpdatedAt      int64       `json:"updatedAt" firestore:"updatedAt" bson:"updatedat"`
+	// Revision is the optimistic-concurrency version of the session. New
+	// sessions start at revision 1. UpdateSession treats the supplied value as
+	// the expected current revision and advances it after a successful update.
+	Revision  uint64 `json:"revision" firestore:"revision" bson:"revision"`
+	CreatedAt int64  `json:"createdAt" firestore:"createdAt" bson:"createdat"`
+	UpdatedAt int64  `json:"updatedAt" firestore:"updatedAt" bson:"updatedat"`
 }
 
 // Interrupt is the persisted shape of an unresolved pause on a session.
@@ -123,6 +134,10 @@ type Store interface {
 	GetSession(ctx context.Context, id string) (*Session, error)
 	ListSessions(ctx context.Context, agentID string) ([]*Session, error)
 	ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*Session, error)
+	// UpdateSession atomically persists a session snapshot. The supplied
+	// Revision must match the stored revision; a successful update advances the
+	// revision, updates UpdatedAt, and mutates s with the committed values.
+	// Stale revisions wrap ErrSessionConflict and do not write any state.
 	UpdateSession(ctx context.Context, s *Session) error
 	DeleteSession(ctx context.Context, id string) error
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/ratrektlabs/rakit/storage/metadata"
@@ -72,13 +73,15 @@ func (s *Store) Close(ctx context.Context) error {
 func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().Unix()
 	sess := &metadata.Session{
-		ID:        newID(),
-		AgentID:   agentID,
-		UserID:    userID,
-		Messages:  []metadata.Message{},
-		State:     map[string]any{},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             newID(),
+		AgentID:        agentID,
+		UserID:         userID,
+		Messages:       []metadata.Message{},
+		State:          map[string]any{},
+		OpenInterrupts: []metadata.Interrupt{},
+		Revision:       1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	_, err := s.sessions.InsertOne(ctx, sess)
 	if err != nil {
@@ -103,15 +106,66 @@ func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error
 	if sess == nil {
 		return fmt.Errorf("update session: nil session")
 	}
-	sess.UpdatedAt = time.Now().Unix()
-	res, err := s.sessions.ReplaceOne(ctx, bson.D{{Key: "id", Value: sess.ID}}, sess)
+	if sess.ID == "" {
+		return fmt.Errorf("update session: empty id")
+	}
+	const maxStoredRevision uint64 = 1<<63 - 1
+	if sess.Revision >= maxStoredRevision {
+		return fmt.Errorf("update session %q: revision overflow", sess.ID)
+	}
+	expectedRevision := sess.Revision
+	nextRevision := expectedRevision + 1
+	var existing metadata.Session
+	if err := s.sessions.FindOne(ctx, bson.D{{Key: "id", Value: sess.ID}}).Decode(&existing); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return fmt.Errorf("update session %q: not found", sess.ID)
+		}
+		return fmt.Errorf("update session %q: inspect current session: %w", sess.ID, err)
+	}
+	committed := *sess
+	committed.CreatedAt = existing.CreatedAt
+	committed.Revision = nextRevision
+	now := time.Now().Unix()
+	if now <= existing.UpdatedAt {
+		if existing.UpdatedAt == int64(^uint64(0)>>1) {
+			return fmt.Errorf("update session %q: updatedAt overflow", sess.ID)
+		}
+		now = existing.UpdatedAt + 1
+	}
+	committed.UpdatedAt = now
+	if committed.OpenInterrupts == nil {
+		committed.OpenInterrupts = []metadata.Interrupt{}
+	}
+	res, err := s.sessions.ReplaceOne(ctx, sessionRevisionFilter(sess.ID, expectedRevision), &committed)
 	if err != nil {
 		return fmt.Errorf("update session %q: %w", sess.ID, err)
 	}
 	if res.MatchedCount == 0 {
-		return fmt.Errorf("update session %q: not found", sess.ID)
+		err := s.sessions.FindOne(ctx, bson.D{{Key: "id", Value: sess.ID}}).Decode(&existing)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return fmt.Errorf("update session %q: not found", sess.ID)
+		}
+		if err != nil {
+			return fmt.Errorf("update session %q: inspect current revision: %w", sess.ID, err)
+		}
+		return fmt.Errorf("update session %q: %w (stored revision %d, supplied %d)", sess.ID, metadata.ErrSessionConflict, existing.Revision, expectedRevision)
 	}
+	sess.Revision = nextRevision
+	sess.CreatedAt = existing.CreatedAt
+	sess.UpdatedAt = now
 	return nil
+}
+
+func sessionRevisionFilter(id string, revision uint64) bson.D {
+	filter := bson.D{{Key: "id", Value: id}}
+	if revision == 0 {
+		filter = append(filter, bson.E{Key: "$or", Value: bson.A{
+			bson.D{{Key: "revision", Value: int64(0)}},
+			bson.D{{Key: "revision", Value: bson.D{{Key: "$exists", Value: false}}}},
+		}})
+		return filter
+	}
+	return append(filter, bson.E{Key: "revision", Value: int64(revision)})
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
@@ -141,6 +195,12 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 	if sessions == nil {
 		sessions = []*metadata.Session{}
 	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
+			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 	return sessions, nil
 }
 
@@ -167,6 +227,12 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 	if sessions == nil {
 		sessions = []*metadata.Session{}
 	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
+			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 	return sessions, nil
 }
 

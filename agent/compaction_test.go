@@ -50,7 +50,7 @@ func TestMetadataToProviderMessages(t *testing.T) {
 func TestProviderToolCallsToRecords(t *testing.T) {
 	in := []provider.ToolCall{{ID: "c", Name: "t", Arguments: "{}"}}
 	out := providerToolCallsToRecords(in)
-	if len(out) != 1 || out[0].Status != "completed" {
+	if len(out) != 1 || out[0].Status != "pending" {
 		t.Fatalf("records=%+v", out)
 	}
 	if providerToolCallsToRecords(nil) != nil {

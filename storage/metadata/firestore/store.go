@@ -3,12 +3,14 @@ package firestore
 import (
 	"context"
 	"fmt"
-	"strings"
+	"sort"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/ratrektlabs/rakit/storage/metadata"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -47,13 +49,15 @@ func (s *Store) Close() error {
 func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().Unix()
 	session := &metadata.Session{
-		ID:        "",
-		AgentID:   agentID,
-		UserID:    userID,
-		Messages:  []metadata.Message{},
-		State:     map[string]any{},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             "",
+		AgentID:        agentID,
+		UserID:         userID,
+		Messages:       []metadata.Message{},
+		State:          map[string]any{},
+		OpenInterrupts: []metadata.Interrupt{},
+		Revision:       1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	// Firestore auto-generates the document ID.
@@ -77,6 +81,9 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, error) {
 	doc, err := s.client.Collection(sessionsCol).Doc(id).Get(ctx)
 	if err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("firestore: get session %s: %w", id, err)
 	}
 
@@ -97,18 +104,69 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 
 // UpdateSession writes the session document and upserts all messages.
 func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error {
+	if sess == nil {
+		return fmt.Errorf("firestore: update session: nil session")
+	}
 	if sess.ID == "" {
 		return fmt.Errorf("firestore: update session: empty id")
 	}
 
-	now := time.Now().Unix()
-	sess.UpdatedAt = now
-
 	ref := s.client.Collection(sessionsCol).Doc(sess.ID)
+	existingMessages, err := s.loadMessages(ctx, sess.ID)
+	if err != nil && !isNotFound(err) {
+		return err
+	}
+	if existingMessages == nil {
+		existingMessages = []metadata.Message{}
+	}
+	expectedRevision := sess.Revision
+	const maxStoredRevision uint64 = 1<<63 - 1
+	if expectedRevision >= maxStoredRevision {
+		return fmt.Errorf("firestore: update session %s: revision overflow", sess.ID)
+	}
+	nextRevision := expectedRevision + 1
+	var now int64
+	committed := *sess
+	committed.Revision = nextRevision
+	if committed.OpenInterrupts == nil {
+		committed.OpenInterrupts = []metadata.Interrupt{}
+	}
 
-	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+	err = s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		doc, err := tx.Get(ref)
+		if err != nil {
+			if isNotFound(err) {
+				return fmt.Errorf("firestore: update session %s: not found", sess.ID)
+			}
+			return fmt.Errorf("get session: %w", err)
+		}
+		storedRevision, err := revisionFromMap(doc.Data())
+		if err != nil {
+			return err
+		}
+		if storedRevision != expectedRevision {
+			return fmt.Errorf("firestore: update session %s: %w (stored revision %d, supplied %d)", sess.ID, metadata.ErrSessionConflict, storedRevision, expectedRevision)
+		}
+		createdAt, err := int64FromMap(doc.Data(), "createdAt")
+		if err != nil {
+			return err
+		}
+		committed.CreatedAt = createdAt
+		currentUpdatedAt, err := int64FromMap(doc.Data(), "updatedAt")
+		if err != nil {
+			return err
+		}
+		now = time.Now().Unix()
+		if now <= currentUpdatedAt {
+			if currentUpdatedAt == int64(^uint64(0)>>1) {
+				return fmt.Errorf("firestore: update session %s: updatedAt overflow", sess.ID)
+			}
+			now = currentUpdatedAt + 1
+		}
+		committed.UpdatedAt = now
+
 		// Persist the session metadata (without the messages slice itself).
-		if err := tx.Set(ref, toSessionMap(sess)); err != nil {
+		if err := tx.Set(ref, toSessionMap(&committed)); err != nil {
 			return fmt.Errorf("set session: %w", err)
 		}
 
@@ -123,11 +181,28 @@ func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error
 				return fmt.Errorf("set message %s: %w", m.ID, err)
 			}
 		}
+		currentIDs := make(map[string]struct{}, len(sess.Messages))
+		for _, m := range sess.Messages {
+			if m.ID != "" {
+				currentIDs[m.ID] = struct{}{}
+			}
+		}
+		for _, m := range existingMessages {
+			if _, ok := currentIDs[m.ID]; ok || m.ID == "" {
+				continue
+			}
+			if err := tx.Delete(msgCol.Doc(m.ID)); err != nil {
+				return fmt.Errorf("delete message %s: %w", m.ID, err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("firestore: update session %s: %w", sess.ID, err)
 	}
+	sess.Revision = nextRevision
+	sess.CreatedAt = committed.CreatedAt
+	sess.UpdatedAt = now
 	return nil
 }
 
@@ -154,8 +229,11 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 	var sessions []*metadata.Session
 	for {
 		doc, err := iter.Next()
-		if err != nil {
+		if err == iterator.Done {
 			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("firestore: list sessions: %w", err)
 		}
 		data := doc.Data()
 		agentID, _ := data["agentID"].(string)
@@ -163,6 +241,10 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 		parentSessionID, _ := data["parentSessionID"].(string)
 		createdAt, _ := data["createdAt"].(int64)
 		updatedAt, _ := data["updatedAt"].(int64)
+		revision, err := revisionFromMap(data)
+		if err != nil {
+			return nil, err
+		}
 		sess := &metadata.Session{
 			ID:              doc.Ref.ID,
 			AgentID:         agentID,
@@ -170,6 +252,7 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 			ParentSessionID: parentSessionID,
 			CreatedAt:       createdAt,
 			UpdatedAt:       updatedAt,
+			Revision:        revision,
 			Messages:        []metadata.Message{},
 		}
 		sessions = append(sessions, sess)
@@ -177,6 +260,12 @@ func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.S
 	if sessions == nil {
 		sessions = []*metadata.Session{}
 	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
+			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 	return sessions, nil
 }
 
@@ -191,8 +280,11 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 	var sessions []*metadata.Session
 	for {
 		doc, err := iter.Next()
-		if err != nil {
+		if err == iterator.Done {
 			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("firestore: list sessions by user: %w", err)
 		}
 		data := doc.Data()
 		aid, _ := data["agentID"].(string)
@@ -200,6 +292,10 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 		parentSessionID, _ := data["parentSessionID"].(string)
 		createdAt, _ := data["createdAt"].(int64)
 		updatedAt, _ := data["updatedAt"].(int64)
+		revision, err := revisionFromMap(data)
+		if err != nil {
+			return nil, err
+		}
 		sess := &metadata.Session{
 			ID:              doc.Ref.ID,
 			AgentID:         aid,
@@ -207,6 +303,7 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 			ParentSessionID: parentSessionID,
 			CreatedAt:       createdAt,
 			UpdatedAt:       updatedAt,
+			Revision:        revision,
 			Messages:        []metadata.Message{},
 		}
 		sessions = append(sessions, sess)
@@ -214,6 +311,12 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 	if sessions == nil {
 		sessions = []*metadata.Session{}
 	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
+			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 	return sessions, nil
 }
 
@@ -557,14 +660,68 @@ func prefixIncrement(prefix string) string {
 // toSessionMap converts a Session to a map suitable for Firestore.
 // Messages are stored in a subcollection, not inline.
 func toSessionMap(sess *metadata.Session) map[string]any {
+	interrupts := sess.OpenInterrupts
+	if interrupts == nil {
+		interrupts = []metadata.Interrupt{}
+	}
 	return map[string]any{
 		"id":              sess.ID,
 		"agentID":         sess.AgentID,
 		"userID":          sess.UserID,
 		"parentSessionID": sess.ParentSessionID,
 		"state":           sess.State,
+		"openInterrupts":  interrupts,
+		"revision":        int64(sess.Revision),
 		"createdAt":       sess.CreatedAt,
 		"updatedAt":       sess.UpdatedAt,
+	}
+}
+
+func revisionFromMap(data map[string]any) (uint64, error) {
+	raw, ok := data["revision"]
+	if !ok || raw == nil {
+		return 0, nil
+	}
+	switch value := raw.(type) {
+	case int64:
+		if value < 0 {
+			return 0, fmt.Errorf("firestore: invalid negative session revision %d", value)
+		}
+		return uint64(value), nil
+	case int:
+		if value < 0 {
+			return 0, fmt.Errorf("firestore: invalid negative session revision %d", value)
+		}
+		return uint64(value), nil
+	case uint64:
+		return value, nil
+	case uint:
+		return uint64(value), nil
+	default:
+		return 0, fmt.Errorf("firestore: invalid session revision type %T", raw)
+	}
+}
+
+func int64FromMap(data map[string]any, key string) (int64, error) {
+	raw, ok := data[key]
+	if !ok || raw == nil {
+		return 0, nil
+	}
+	switch value := raw.(type) {
+	case int64:
+		return value, nil
+	case int:
+		return int64(value), nil
+	case uint64:
+		const maxInt64Value uint64 = 1<<63 - 1
+		if value > maxInt64Value {
+			return 0, fmt.Errorf("firestore: %s exceeds int64", key)
+		}
+		return int64(value), nil
+	case uint:
+		return int64(value), nil
+	default:
+		return 0, fmt.Errorf("firestore: invalid %s type %T", key, raw)
 	}
 }
 
@@ -618,7 +775,7 @@ func toolFromMap(m map[string]any) *metadata.ToolDef {
 
 // isNotFound returns true if the error indicates a missing document.
 func isNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "not-found")
+	return status.Code(err) == codes.NotFound
 }
 
 // Verify interface compliance at compile time.

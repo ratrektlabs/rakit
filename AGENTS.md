@@ -11,7 +11,7 @@ this codebase. Prefer the prose here over re-deriving conventions from the code.
 - `tool/` — `Tool` interface, `Registry`, `FunctionTool`.
 - `skill/` — three-layer skill system: `Entry` (L1), `Definition` (L2), `ResourceManager` (L3).
 - `mcp/` — Model Context Protocol client with pluggable HTTP / SSE transports.
-- `storage/metadata/` — `Store` interface + SQLite / Firestore / MongoDB adapters.
+- `storage/metadata/` — `Store` interface + JSONL / SQLite / Firestore / MongoDB adapters.
 - `storage/blob/` — `BlobStore` interface + local / S3 / Firebase adapters.
 - `examples/local/` — end-to-end dev server (HTTP, admin API, embedded UI).
 - `examples/cloud-run/` — Cloud Run deployment example.
@@ -52,7 +52,17 @@ make lint        # requires golangci-lint
 Implement `storage/metadata.Store` in full. There is no optional method —
 session, tool, skill, scoped memory, legacy KV, and MCP server operations must
 all work. Scoped memory keys are built with `metadata.ScopedKey`; all adapters
-MUST use this helper to stay consistent.
+MUST use this helper to stay consistent. `metadata.Store.UpdateSession` is the
+single agent persistence path: implementations must honor Session.Revision as
+the expected optimistic-concurrency revision, advance it atomically on
+success, mutate the caller with committed timestamps, and wrap
+`metadata.ErrSessionConflict` for stale writes.
+
+The JSONL adapter is filesystem-only. Its workspace-scoped project directory
+contains append-only session transcripts plus `_store` metadata logs and
+`_locks`; it must not import or open SQLite. Preserve its versioned envelope,
+path-safety, private-permission, fsync, replay-repair, lock, conflict, and
+mutable-log compaction invariants when changing it.
 
 ## Do not
 

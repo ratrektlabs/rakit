@@ -117,106 +117,154 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 
 // UpdateSession writes the session document and upserts all messages.
 func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error {
+	if err := validateSessionUpdate(sess); err != nil {
+		return err
+	}
+
+	existingMessages, err := s.loadExistingMessages(ctx, sess.ID)
+	if err != nil {
+		return err
+	}
+	committed, err := s.commitSessionUpdate(ctx, sess, existingMessages)
+	if err != nil {
+		return fmt.Errorf("firestore: update session %s: %w", sess.ID, err)
+	}
+	applyCommittedSession(sess, committed)
+	return nil
+}
+
+func validateSessionUpdate(sess *metadata.Session) error {
 	if sess == nil {
 		return fmt.Errorf("firestore: update session: nil session")
 	}
 	if sess.ID == "" {
 		return fmt.Errorf("firestore: update session: empty id")
 	}
-
-	ref := s.client.Collection(sessionsCol).Doc(sess.ID)
-	existingMessages, err := s.loadMessages(ctx, sess.ID)
-	if err != nil && !isNotFound(err) {
-		return err
-	}
-	if existingMessages == nil {
-		existingMessages = []metadata.Message{}
-	}
-	expectedRevision := sess.Revision
 	const maxStoredRevision uint64 = 1<<63 - 1
-	if expectedRevision >= maxStoredRevision {
+	if sess.Revision >= maxStoredRevision {
 		return fmt.Errorf("firestore: update session %s: revision overflow", sess.ID)
 	}
-	nextRevision := expectedRevision + 1
-	var now int64
-	committed := *sess
-	committed.Revision = nextRevision
+	return nil
+}
+
+func (s *Store) loadExistingMessages(ctx context.Context, sessionID string) ([]metadata.Message, error) {
+	messages, err := s.loadMessages(ctx, sessionID)
+	if err != nil && !isNotFound(err) {
+		return nil, err
+	}
+	if messages == nil {
+		return []metadata.Message{}, nil
+	}
+	return messages, nil
+}
+
+func (s *Store) commitSessionUpdate(
+	ctx context.Context,
+	requested *metadata.Session,
+	existingMessages []metadata.Message,
+) (*metadata.Session, error) {
+	ref := s.client.Collection(sessionsCol).Doc(requested.ID)
+	committed := *requested
+	committed.Revision = requested.Revision + 1
 	if committed.OpenInterrupts == nil {
 		committed.OpenInterrupts = []metadata.Interrupt{}
 	}
 
-	err = s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
-		doc, err := tx.Get(ref)
-		if err != nil {
-			if isNotFound(err) {
-				return fmt.Errorf("firestore: update session %s: not found", sess.ID)
-			}
-			return fmt.Errorf("get session: %w", err)
-		}
-		storedRevision, err := revisionFromMap(doc.Data())
-		if err != nil {
+	err := s.client.RunTransaction(ctx, func(_ context.Context, tx *firestore.Transaction) error {
+		if err := readStoredSessionMetadata(tx, ref, requested.Revision, &committed); err != nil {
 			return err
 		}
-		if storedRevision != expectedRevision {
-			return fmt.Errorf("firestore: update session %s: %w (stored revision %d, supplied %d)", sess.ID, metadata.ErrSessionConflict, storedRevision, expectedRevision)
-		}
-		createdAt, err := int64FromMap(doc.Data(), "createdAt")
-		if err != nil {
-			return err
-		}
-		committed.CreatedAt = createdAt
-		currentUpdatedAt, err := int64FromMap(doc.Data(), "updatedAt")
-		if err != nil {
-			return err
-		}
-		now = time.Now().Unix()
-		if now <= currentUpdatedAt {
-			if currentUpdatedAt == int64(^uint64(0)>>1) {
-				return fmt.Errorf("firestore: update session %s: updatedAt overflow", sess.ID)
-			}
-			now = currentUpdatedAt + 1
-		}
-		committed.UpdatedAt = now
-
-		// Persist the session metadata (without the messages slice itself).
 		if err := tx.Set(ref, toSessionMap(&committed)); err != nil {
 			return fmt.Errorf("set session: %w", err)
 		}
-
-		// Upsert each message into the subcollection.
-		msgCol := ref.Collection(messagesCol)
-		for _, m := range sess.Messages {
-			if m.ID == "" {
-				continue
-			}
-			msgRef := msgCol.Doc(m.ID)
-			if err := tx.Set(msgRef, toMessageMap(&m)); err != nil {
-				return fmt.Errorf("set message %s: %w", m.ID, err)
-			}
-		}
-		currentIDs := make(map[string]struct{}, len(sess.Messages))
-		for _, m := range sess.Messages {
-			if m.ID != "" {
-				currentIDs[m.ID] = struct{}{}
-			}
-		}
-		for _, m := range existingMessages {
-			if _, ok := currentIDs[m.ID]; ok || m.ID == "" {
-				continue
-			}
-			if err := tx.Delete(msgCol.Doc(m.ID)); err != nil {
-				return fmt.Errorf("delete message %s: %w", m.ID, err)
-			}
-		}
-		return nil
+		return reconcileSessionMessages(tx, ref.Collection(messagesCol), requested.Messages, existingMessages)
 	})
 	if err != nil {
-		return fmt.Errorf("firestore: update session %s: %w", sess.ID, err)
+		return nil, err
 	}
-	sess.Revision = nextRevision
-	sess.CreatedAt = committed.CreatedAt
-	sess.UpdatedAt = now
+	return &committed, nil
+}
+
+func readStoredSessionMetadata(
+	tx *firestore.Transaction,
+	ref *firestore.DocumentRef,
+	expectedRevision uint64,
+	committed *metadata.Session,
+) error {
+	doc, err := tx.Get(ref)
+	if err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("not found")
+		}
+		return fmt.Errorf("get session: %w", err)
+	}
+	data := doc.Data()
+	storedRevision, err := revisionFromMap(data)
+	if err != nil {
+		return err
+	}
+	if storedRevision != expectedRevision {
+		return fmt.Errorf(
+			"%w (stored revision %d, supplied %d)",
+			metadata.ErrSessionConflict,
+			storedRevision,
+			expectedRevision,
+		)
+	}
+	committed.CreatedAt, err = int64FromMap(data, "createdAt")
+	if err != nil {
+		return err
+	}
+	currentUpdatedAt, err := int64FromMap(data, "updatedAt")
+	if err != nil {
+		return err
+	}
+	committed.UpdatedAt, err = nextFirestoreUpdatedAt(currentUpdatedAt)
+	return err
+}
+
+func nextFirestoreUpdatedAt(current int64) (int64, error) {
+	now := time.Now().Unix()
+	if now > current {
+		return now, nil
+	}
+	if current == int64(^uint64(0)>>1) {
+		return 0, fmt.Errorf("updatedAt overflow")
+	}
+	return current + 1, nil
+}
+
+func reconcileSessionMessages(
+	tx *firestore.Transaction,
+	collection *firestore.CollectionRef,
+	current []metadata.Message,
+	existing []metadata.Message,
+) error {
+	currentIDs := make(map[string]struct{}, len(current))
+	for _, message := range current {
+		if message.ID == "" {
+			continue
+		}
+		currentIDs[message.ID] = struct{}{}
+		if err := tx.Set(collection.Doc(message.ID), toMessageMap(&message)); err != nil {
+			return fmt.Errorf("set message %s: %w", message.ID, err)
+		}
+	}
+	for _, message := range existing {
+		if _, retained := currentIDs[message.ID]; retained || message.ID == "" {
+			continue
+		}
+		if err := tx.Delete(collection.Doc(message.ID)); err != nil {
+			return fmt.Errorf("delete message %s: %w", message.ID, err)
+		}
+	}
 	return nil
+}
+
+func applyCommittedSession(target *metadata.Session, committed *metadata.Session) {
+	target.Revision = committed.Revision
+	target.CreatedAt = committed.CreatedAt
+	target.UpdatedAt = committed.UpdatedAt
 }
 
 // DeleteSession removes a session document and all its message subdocuments.
@@ -615,7 +663,11 @@ func toSessionMap(sess *metadata.Session) map[string]any {
 	}
 }
 
-func collectSessionSummaries(ctx context.Context, queries []firestore.Query, operation string) ([]*metadata.Session, error) {
+func collectSessionSummaries(
+	ctx context.Context,
+	queries []firestore.Query,
+	operation string,
+) ([]*metadata.Session, error) {
 	byID := make(map[string]*metadata.Session)
 	for _, query := range queries {
 		iter := query.Documents(ctx)

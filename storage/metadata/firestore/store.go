@@ -91,6 +91,19 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 	if err := doc.DataTo(&session); err != nil {
 		return nil, fmt.Errorf("firestore: decode session %s: %w", id, err)
 	}
+	// Older adapter versions wrote acronym-style field names even though the
+	// metadata tags used lower camel case. Keep those documents readable; the
+	// next update rewrites them using the canonical lower-camel names.
+	data := doc.Data()
+	if session.AgentID == "" {
+		session.AgentID = stringFromMap(data, "agentId", "agentID")
+	}
+	if session.UserID == "" {
+		session.UserID = stringFromMap(data, "userId", "userID")
+	}
+	if session.ParentSessionID == "" {
+		session.ParentSessionID = stringFromMap(data, "parentSessionId", "parentSessionID")
+	}
 	session.ID = id
 
 	// Load messages from subcollection.
@@ -223,101 +236,26 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
-	iter := s.client.Collection(sessionsCol).Where("agentID", "==", agentID).Documents(ctx)
-	defer iter.Stop()
-
-	var sessions []*metadata.Session
-	for {
-		doc, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("firestore: list sessions: %w", err)
-		}
-		data := doc.Data()
-		agentID, _ := data["agentID"].(string)
-		userID, _ := data["userID"].(string)
-		parentSessionID, _ := data["parentSessionID"].(string)
-		createdAt, _ := data["createdAt"].(int64)
-		updatedAt, _ := data["updatedAt"].(int64)
-		revision, err := revisionFromMap(data)
-		if err != nil {
-			return nil, err
-		}
-		sess := &metadata.Session{
-			ID:              doc.Ref.ID,
-			AgentID:         agentID,
-			UserID:          userID,
-			ParentSessionID: parentSessionID,
-			CreatedAt:       createdAt,
-			UpdatedAt:       updatedAt,
-			Revision:        revision,
-			Messages:        []metadata.Message{},
-		}
-		sessions = append(sessions, sess)
+	queries := []firestore.Query{
+		s.client.Collection(sessionsCol).Where("agentId", "==", agentID),
+		// Compatibility with documents written before field names were aligned
+		// with metadata.Session's JSON and Firestore tags.
+		s.client.Collection(sessionsCol).Where("agentID", "==", agentID),
 	}
-	if sessions == nil {
-		sessions = []*metadata.Session{}
-	}
-	sort.SliceStable(sessions, func(i, j int) bool {
-		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
-			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
-		}
-		return sessions[i].ID < sessions[j].ID
-	})
-	return sessions, nil
+	return collectSessionSummaries(ctx, queries, "list sessions")
 }
 
 // ListSessionsByUser returns sessions for the given agentID and userID.
 func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
-	iter := s.client.Collection(sessionsCol).
-		Where("agentID", "==", agentID).
-		Where("userID", "==", userID).
-		Documents(ctx)
-	defer iter.Stop()
-
-	var sessions []*metadata.Session
-	for {
-		doc, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("firestore: list sessions by user: %w", err)
-		}
-		data := doc.Data()
-		aid, _ := data["agentID"].(string)
-		uid, _ := data["userID"].(string)
-		parentSessionID, _ := data["parentSessionID"].(string)
-		createdAt, _ := data["createdAt"].(int64)
-		updatedAt, _ := data["updatedAt"].(int64)
-		revision, err := revisionFromMap(data)
-		if err != nil {
-			return nil, err
-		}
-		sess := &metadata.Session{
-			ID:              doc.Ref.ID,
-			AgentID:         aid,
-			UserID:          uid,
-			ParentSessionID: parentSessionID,
-			CreatedAt:       createdAt,
-			UpdatedAt:       updatedAt,
-			Revision:        revision,
-			Messages:        []metadata.Message{},
-		}
-		sessions = append(sessions, sess)
+	queries := []firestore.Query{
+		s.client.Collection(sessionsCol).
+			Where("agentId", "==", agentID).
+			Where("userId", "==", userID),
+		s.client.Collection(sessionsCol).
+			Where("agentID", "==", agentID).
+			Where("userID", "==", userID),
 	}
-	if sessions == nil {
-		sessions = []*metadata.Session{}
-	}
-	sort.SliceStable(sessions, func(i, j int) bool {
-		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
-			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
-		}
-		return sessions[i].ID < sessions[j].ID
-	})
-	return sessions, nil
+	return collectSessionSummaries(ctx, queries, "list sessions by user")
 }
 
 // ---------------------------------------------------------------------------
@@ -666,15 +604,84 @@ func toSessionMap(sess *metadata.Session) map[string]any {
 	}
 	return map[string]any{
 		"id":              sess.ID,
-		"agentID":         sess.AgentID,
-		"userID":          sess.UserID,
-		"parentSessionID": sess.ParentSessionID,
+		"agentId":         sess.AgentID,
+		"userId":          sess.UserID,
+		"parentSessionId": sess.ParentSessionID,
 		"state":           sess.State,
 		"openInterrupts":  interrupts,
 		"revision":        int64(sess.Revision),
 		"createdAt":       sess.CreatedAt,
 		"updatedAt":       sess.UpdatedAt,
 	}
+}
+
+func collectSessionSummaries(ctx context.Context, queries []firestore.Query, operation string) ([]*metadata.Session, error) {
+	byID := make(map[string]*metadata.Session)
+	for _, query := range queries {
+		iter := query.Documents(ctx)
+		for {
+			doc, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				iter.Stop()
+				return nil, fmt.Errorf("firestore: %s: %w", operation, err)
+			}
+			sess, err := sessionSummaryFromMap(doc.Ref.ID, doc.Data())
+			if err != nil {
+				iter.Stop()
+				return nil, err
+			}
+			byID[sess.ID] = sess
+		}
+		iter.Stop()
+	}
+
+	sessions := make([]*metadata.Session, 0, len(byID))
+	for _, sess := range byID {
+		sessions = append(sessions, sess)
+	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
+			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
+	return sessions, nil
+}
+
+func sessionSummaryFromMap(id string, data map[string]any) (*metadata.Session, error) {
+	revision, err := revisionFromMap(data)
+	if err != nil {
+		return nil, err
+	}
+	createdAt, err := int64FromMap(data, "createdAt")
+	if err != nil {
+		return nil, err
+	}
+	updatedAt, err := int64FromMap(data, "updatedAt")
+	if err != nil {
+		return nil, err
+	}
+	return &metadata.Session{
+		ID:              id,
+		AgentID:         stringFromMap(data, "agentId", "agentID"),
+		UserID:          stringFromMap(data, "userId", "userID"),
+		ParentSessionID: stringFromMap(data, "parentSessionId", "parentSessionID"),
+		CreatedAt:       createdAt,
+		UpdatedAt:       updatedAt,
+		Revision:        revision,
+		Messages:        []metadata.Message{},
+	}, nil
+}
+
+func stringFromMap(data map[string]any, key string, legacyKey string) string {
+	if value, ok := data[key].(string); ok {
+		return value
+	}
+	value, _ := data[legacyKey].(string)
+	return value
 }
 
 func revisionFromMap(data map[string]any) (uint64, error) {

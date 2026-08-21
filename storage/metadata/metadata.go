@@ -12,9 +12,9 @@ var ErrSessionConflict = errors.New("metadata: session revision conflict")
 // Session represents a conversation session.
 type Session struct {
 	ID              string         `json:"id" firestore:"id" bson:"id"`
-	AgentID         string         `json:"agentId" firestore:"agentID" bson:"agentid"`
-	UserID          string         `json:"userId" firestore:"userID" bson:"userid"`
-	ParentSessionID string         `json:"parentSessionId,omitempty" firestore:"parentSessionID" bson:"parentsessionid,omitempty"`
+	AgentID         string         `json:"agentId" firestore:"agentId" bson:"agentid"`
+	UserID          string         `json:"userId" firestore:"userId" bson:"userid"`
+	ParentSessionID string         `json:"parentSessionId,omitempty" firestore:"parentSessionId" bson:"parentsessionid,omitempty"`
 	Messages        []Message      `json:"messages" firestore:"messages" bson:"messages"`
 	State           map[string]any `json:"state" firestore:"state" bson:"state"`
 	// OpenInterrupts is the set of unresolved interrupts raised by the most

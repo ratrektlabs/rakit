@@ -203,7 +203,9 @@ func (a *Agent) Resume(
 		}
 	}
 
-	// Find the assistant message whose tool calls were paused.
+	// Find the assistant message whose tool calls were paused. A previous
+	// process may have persisted one or more terminal results before it
+	// stopped, so open interrupts are also considered when locating the batch.
 	pausedIdx := -1
 	for i := len(sess.Messages) - 1; i >= 0; i-- {
 		m := sess.Messages[i]
@@ -211,7 +213,7 @@ func (a *Agent) Resume(
 			continue
 		}
 		for _, tc := range m.ToolCalls {
-			if strings.HasPrefix(tc.Status, "pending") {
+			if strings.HasPrefix(tc.Status, "pending") || interruptForToolCall(sess.OpenInterrupts, tc.ID) != nil {
 				pausedIdx = i
 				break
 			}
@@ -255,26 +257,84 @@ func (a *Agent) Resume(
 		paused := &sess.Messages[pausedIdx]
 		for i := range paused.ToolCalls {
 			tc := paused.ToolCalls[i]
+			if isTerminalToolCall(tc) {
+				// The result was durably recorded by an earlier attempt. Do
+				// not execute the tool or emit a duplicate result event. If
+				// the corresponding interrupt still exists, remove it and
+				// persist that transition before continuing.
+				if removeInterruptForToolCall(&sess.OpenInterrupts, tc.ID) {
+					if err := a.persistSession(context.Background(), sess); err != nil {
+						events <- &ErrorEvent{Err: fmt.Errorf("agent: persist resumed interrupt cleanup: %w", err)}
+						return
+					}
+				}
+				providerMsgs = append(providerMsgs, provider.Message{
+					Role:      "tool",
+					Content:   tc.Result,
+					ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
+				})
+				continue
+			}
 			resultStr, status := a.resolveToolCall(ctx, tc, inputByToolCallID, registry)
 			paused.ToolCalls[i].Result = resultStr
 			paused.ToolCalls[i].Status = status
+			removeInterruptForToolCall(&sess.OpenInterrupts, tc.ID)
 			providerMsgs = append(providerMsgs, provider.Message{
 				Role:      "tool",
 				Content:   resultStr,
 				ToolCalls: []provider.ToolCall{{ID: tc.ID, Name: tc.Name}},
 			})
+			if err := a.persistSession(context.Background(), sess); err != nil {
+				events <- &ErrorEvent{Err: fmt.Errorf("agent: persist resumed tool result: %w", err)}
+				return
+			}
 			events <- &ToolResultEvent{ToolCallID: tc.ID, Result: resultStr}
 		}
 
-		sess.OpenInterrupts = nil
-		if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
-			log.Printf("session save failed: %v", err)
+		// Interrupts without a tool call are still resolved by the input
+		// validation above. Persist their removal as one final transition.
+		if len(sess.OpenInterrupts) > 0 {
+			sess.OpenInterrupts = nil
+			if err := a.persistSession(context.Background(), sess); err != nil {
+				events <- &ErrorEvent{Err: fmt.Errorf("agent: persist cleared interrupts: %w", err)}
+				return
+			}
 		}
 
 		a.continueAgenticLoop(ctx, sess, providerMsgs, events, threadID, runID)
 	}()
 
 	return events, nil
+}
+
+func isTerminalToolCall(tc metadata.ToolCallRecord) bool {
+	return tc.Status == "completed" || tc.Status == "failed"
+}
+
+func interruptForToolCall(interrupts []metadata.Interrupt, toolCallID string) *metadata.Interrupt {
+	for i := range interrupts {
+		if interrupts[i].ToolCallID == toolCallID {
+			return &interrupts[i]
+		}
+	}
+	return nil
+}
+
+func removeInterruptForToolCall(interrupts *[]metadata.Interrupt, toolCallID string) bool {
+	if interrupts == nil || toolCallID == "" {
+		return false
+	}
+	items := *interrupts
+	for i := range items {
+		if items[i].ToolCallID != toolCallID {
+			continue
+		}
+		copy(items[i:], items[i+1:])
+		items[len(items)-1] = metadata.Interrupt{}
+		*interrupts = items[:len(items)-1]
+		return true
+	}
+	return false
 }
 
 // resolveToolCall synthesizes a tool-result payload for a single paused tool

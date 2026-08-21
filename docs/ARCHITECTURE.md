@@ -20,7 +20,7 @@ graph LR
     end
 
     subgraph "metadata store"
-        DB[(SQLite · Firestore · MongoDB)]
+        DB[(JSONL · SQLite · Firestore · MongoDB)]
     end
 
     subgraph "blob store"
@@ -79,25 +79,43 @@ sequenceDiagram
     S-->>A: Session with message history
 
     A->>A: Append user message to history
+    A->>S: UpdateSession(user message)
 
     alt history exceeds MaxMessages
         A->>A: Split: old messages | recent messages
         A->>P: Generate(summary of old messages)
         P-->>A: Summary text
         A->>A: Replace old with summary, keep recent
+        A->>S: UpdateSession(compacted history)
     end
 
     A->>P: Stream(full message history + tool schemas)
     P-->>C: Streaming events (text, tool calls)
 
-    A->>S: UpdateSession(sessionID, history + assistant response)
+    alt assistant response has no tool calls
+        A->>S: UpdateSession(assistant response)
+    else assistant response has tool calls
+        A->>S: UpdateSession(assistant tool-call batch)
+        A->>S: UpdateSession(each tool result)
+    end
+
+    A-->>C: RunFinished only after the last state transition is durable
 ```
 
 1. **Load** the session from the metadata store (all previous messages)
-2. **Append** the new user message
-3. **Compact** if history exceeds the threshold (see Compaction below)
+2. **Append and persist** the new user message before compaction or provider work
+3. **Compact and persist** if history exceeds the threshold (see Compaction below)
 4. **Stream** from the LLM provider with full context
-5. **Save** the assistant's response back to the session
+5. **Persist** the assistant response, tool-call batch, and each tool result at
+   their logical boundaries
+6. **Emit** a successful finish only after the final state transition is durable
+
+`Store.UpdateSession` is the single persistence call used by the agent. Each
+session carries an optimistic-concurrency `Revision`: new sessions start at
+`1`, updates require the caller's current revision, and a successful update
+atomically advances the revision and updates `UpdatedAt`. Stale writes wrap
+`metadata.ErrSessionConflict`; an identical final write is intentionally
+avoided because it would advance the revision without changing state.
 
 ---
 
@@ -427,13 +445,32 @@ type Store interface {
 }
 ```
 
+`Session.Revision` is the expected version for `UpdateSession`. Stores mutate
+the caller with the committed revision and timestamp after success. Agent
+resume processing persists each resolved tool result together with removal of
+its matching open interrupt, allowing a later attempt to skip already
+terminal tool calls.
+
 | Adapter | Import | Environment |
 |---------|--------|-------------|
+| JSONL | `storage/metadata/jsonl` | Local filesystem, workspace-scoped transcripts |
 | SQLite | `storage/metadata/sqlite` | Local dev (no external services) |
 | Firestore | `storage/metadata/firestore` | GCP production |
 | MongoDB | `storage/metadata/mongo` | Multi-cloud production |
 
-Not-found returns `nil, nil` (no error) across all adapters.
+Missing reads return `nil, nil` where the adapter supports that convention;
+an `UpdateSession` for a missing session returns an error, while a stale
+revision wraps `metadata.ErrSessionConflict`.
+
+The JSONL adapter keeps each session as an append-only transcript at
+`<root>/projects/<workspace-slug>-<sha256>/<session-id>.jsonl`. The `_store`
+directory contains append-only mutable logs for tools, skills, scoped memory,
+MCP servers, and a rebuildable session index. It uses versioned envelopes,
+newline writes followed by `fsync`, private filesystem permissions, and
+Unix/Windows advisory locking. Session transcripts are never compacted;
+mutable logs are compacted after they exceed 16 MiB and at least half of their
+records are superseded. JSONL contents are plaintext and have no automatic
+retention or SQLite migration.
 
 ### Blob Store
 
@@ -475,9 +512,9 @@ github.com/ratrektlabs/rakit
 ├── tool/           # Tool interface, Result, Registry
 ├── skill/          # 3-layer skill system, handlers, resources
 ├── storage/
-│   ├── metadata/   # Store interface + SQLite, Firestore, MongoDB
+│   ├── metadata/   # Store interface + JSONL, SQLite, Firestore, MongoDB
 │   └── blob/       # BlobStore interface + local, S3, Firebase
 └── examples/
-    ├── local/      # Local dev server (SQLite + local FS)
+    ├── local/      # Local dev server (SQLite default, JSONL opt-in + local FS)
     └── cloud-run/  # Cloud Run deployment (MongoDB + S3)
 ```

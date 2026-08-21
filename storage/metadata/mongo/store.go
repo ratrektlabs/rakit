@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/ratrektlabs/rakit/storage/metadata"
@@ -72,13 +73,15 @@ func (s *Store) Close(ctx context.Context) error {
 func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*metadata.Session, error) {
 	now := time.Now().Unix()
 	sess := &metadata.Session{
-		ID:        newID(),
-		AgentID:   agentID,
-		UserID:    userID,
-		Messages:  []metadata.Message{},
-		State:     map[string]any{},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             newID(),
+		AgentID:        agentID,
+		UserID:         userID,
+		Messages:       []metadata.Message{},
+		State:          map[string]any{},
+		OpenInterrupts: []metadata.Interrupt{},
+		Revision:       1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	_, err := s.sessions.InsertOne(ctx, sess)
 	if err != nil {
@@ -100,18 +103,125 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 }
 
 func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error {
-	if sess == nil {
-		return fmt.Errorf("update session: nil session")
+	if err := validateSessionUpdate(sess); err != nil {
+		return err
 	}
-	sess.UpdatedAt = time.Now().Unix()
-	res, err := s.sessions.ReplaceOne(ctx, bson.D{{Key: "id", Value: sess.ID}}, sess)
+	existing, err := s.loadSessionForUpdate(ctx, sess.ID)
+	if err != nil {
+		return err
+	}
+	committed, err := prepareCommittedSession(sess, existing)
+	if err != nil {
+		return err
+	}
+	result, err := s.sessions.ReplaceOne(
+		ctx,
+		sessionRevisionFilter(sess.ID, sess.Revision),
+		committed,
+	)
 	if err != nil {
 		return fmt.Errorf("update session %q: %w", sess.ID, err)
 	}
-	if res.MatchedCount == 0 {
-		return fmt.Errorf("update session %q: not found", sess.ID)
+	if result.MatchedCount == 0 {
+		return s.classifySessionUpdateMiss(ctx, sess.ID, sess.Revision)
+	}
+	applyCommittedSession(sess, committed)
+	return nil
+}
+
+func validateSessionUpdate(sess *metadata.Session) error {
+	if sess == nil {
+		return fmt.Errorf("update session: nil session")
+	}
+	if sess.ID == "" {
+		return fmt.Errorf("update session: empty id")
+	}
+	const maxStoredRevision uint64 = 1<<63 - 1
+	if sess.Revision >= maxStoredRevision {
+		return fmt.Errorf("update session %q: revision overflow", sess.ID)
 	}
 	return nil
+}
+
+func (s *Store) loadSessionForUpdate(ctx context.Context, sessionID string) (*metadata.Session, error) {
+	var existing metadata.Session
+	err := s.sessions.FindOne(ctx, bson.D{{Key: "id", Value: sessionID}}).Decode(&existing)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, fmt.Errorf("update session %q: not found", sessionID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update session %q: inspect current session: %w", sessionID, err)
+	}
+	return &existing, nil
+}
+
+func prepareCommittedSession(
+	requested *metadata.Session,
+	existing *metadata.Session,
+) (*metadata.Session, error) {
+	updatedAt, err := nextMongoUpdatedAt(requested.ID, existing.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	committed := *requested
+	committed.CreatedAt = existing.CreatedAt
+	committed.UpdatedAt = updatedAt
+	committed.Revision = requested.Revision + 1
+	if committed.OpenInterrupts == nil {
+		committed.OpenInterrupts = []metadata.Interrupt{}
+	}
+	return &committed, nil
+}
+
+func nextMongoUpdatedAt(sessionID string, current int64) (int64, error) {
+	now := time.Now().Unix()
+	if now > current {
+		return now, nil
+	}
+	if current == int64(^uint64(0)>>1) {
+		return 0, fmt.Errorf("update session %q: updatedAt overflow", sessionID)
+	}
+	return current + 1, nil
+}
+
+func (s *Store) classifySessionUpdateMiss(
+	ctx context.Context,
+	sessionID string,
+	expectedRevision uint64,
+) error {
+	var existing metadata.Session
+	err := s.sessions.FindOne(ctx, bson.D{{Key: "id", Value: sessionID}}).Decode(&existing)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return fmt.Errorf("update session %q: not found", sessionID)
+	}
+	if err != nil {
+		return fmt.Errorf("update session %q: inspect current revision: %w", sessionID, err)
+	}
+	return fmt.Errorf(
+		"update session %q: %w (stored revision %d, supplied %d)",
+		sessionID,
+		metadata.ErrSessionConflict,
+		existing.Revision,
+		expectedRevision,
+	)
+}
+
+func applyCommittedSession(target *metadata.Session, committed *metadata.Session) {
+	target.Revision = committed.Revision
+	target.CreatedAt = committed.CreatedAt
+	target.UpdatedAt = committed.UpdatedAt
+}
+
+func sessionRevisionFilter(id string, revision uint64) bson.D {
+	filter := bson.D{{Key: "id", Value: id}}
+	if revision == 0 {
+		filter = append(filter, bson.E{Key: "$or", Value: bson.A{
+			bson.D{{Key: "revision", Value: int64(0)}},
+			bson.D{{Key: "revision", Value: bson.D{{Key: "$exists", Value: false}}}},
+		}})
+		return filter
+	}
+	return append(filter, bson.E{Key: "revision", Value: int64(revision)})
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
@@ -123,25 +233,8 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
-	cursor, err := s.sessions.Find(ctx, bson.D{{Key: "agentid", Value: agentID}})
-	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var sessions []*metadata.Session
-	for cursor.Next(ctx) {
-		var sess metadata.Session
-		if err := cursor.Decode(&sess); err != nil {
-			return nil, fmt.Errorf("decode session: %w", err)
-		}
-		sess.Messages = []metadata.Message{}
-		sessions = append(sessions, &sess)
-	}
-	if sessions == nil {
-		sessions = []*metadata.Session{}
-	}
-	return sessions, nil
+	filter := bson.D{{Key: "agentid", Value: agentID}}
+	return s.findSessionSummaries(ctx, filter, "list sessions")
 }
 
 func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
@@ -149,13 +242,21 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 		{Key: "agentid", Value: agentID},
 		{Key: "userid", Value: userID},
 	}
+	return s.findSessionSummaries(ctx, filter, "list sessions by user")
+}
+
+func (s *Store) findSessionSummaries(
+	ctx context.Context,
+	filter bson.D,
+	operation string,
+) ([]*metadata.Session, error) {
 	cursor, err := s.sessions.Find(ctx, filter)
 	if err != nil {
-		return nil, fmt.Errorf("list sessions by user: %w", err)
+		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
-	var sessions []*metadata.Session
+	sessions := make([]*metadata.Session, 0)
 	for cursor.Next(ctx) {
 		var sess metadata.Session
 		if err := cursor.Decode(&sess); err != nil {
@@ -164,9 +265,12 @@ func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) 
 		sess.Messages = []metadata.Message{}
 		sessions = append(sessions, &sess)
 	}
-	if sessions == nil {
-		sessions = []*metadata.Session{}
-	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].UpdatedAt != sessions[j].UpdatedAt {
+			return sessions[i].UpdatedAt > sessions[j].UpdatedAt
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
 	return sessions, nil
 }
 

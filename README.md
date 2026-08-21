@@ -14,7 +14,7 @@
 - Session persistence with automatic compaction
 - **Scoped memory** — key-value store with global, agent, and user scopes
 - 3-layer skill system (registration -> prompt -> resources) with instruction injection
-- Pluggable storage (SQLite, Firestore, MongoDB + S3, Firebase, local FS)
+- Pluggable storage (JSONL, SQLite, Firestore, MongoDB + S3, Firebase, local FS)
 - Content negotiation — one agent, any frontend
 - **Admin REST API** — manage sessions, skills, tools, MCP servers, memory, workspace, and provider at runtime
 - **Function tools** — register Go functions as tools directly with `WithFunction`
@@ -291,9 +291,27 @@ p.SetModel("gemini-2.0-flash")
 
 | Adapter | Import | Use case |
 |---------|--------|----------|
+| JSONL | `storage/metadata/jsonl` | Local filesystem transcripts |
 | SQLite | `storage/metadata/sqlite` | Local development |
 | Firestore | `storage/metadata/firestore` | GCP production |
 | MongoDB | `storage/metadata/mongo` | Multi-cloud production |
+
+The JSONL adapter is filesystem-only and does not open SQLite. Construct it
+with a root directory and the workspace path:
+
+```go
+store, err := jsonl.NewStore(ctx, jsonl.Config{
+    RootDir:       "./data/jsonl",
+    WorkspacePath: "/absolute/path/to/project",
+})
+```
+
+It stores sessions under `RootDir/projects/<workspace-slug>-<sha256>/` as
+append-only `<session-id>.jsonl` transcripts. Mutable tools, skills, memory,
+MCP, and the rebuildable session index live in `_store/`. Writes use private
+`0700` directories, `0600` files, newline durability, and local advisory
+locks. The files are plaintext and should be protected accordingly. JSONL
+does not automatically import SQLite data or delete old sessions.
 
 **Blob** (agent workspace — files, scripts, artifacts):
 
@@ -313,7 +331,7 @@ p.SetModel("gemini-2.0-flash")
 
 | Example | Description | Storage |
 |---------|-------------|---------|
-| [examples/local](examples/local) | Local dev server with admin UI and REST API | SQLite + Local FS |
+| [examples/local](examples/local) | Local dev server with admin UI and REST API | SQLite + Local FS (JSONL opt-in) |
 | [examples/cloud-run](examples/cloud-run) | Cloud Run deployment | MongoDB + S3 |
 
 ## License

@@ -2,11 +2,14 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/ratrektlabs/rakit/storage/metadata"
 	"github.com/ratrektlabs/rakit/storage/metadata/sqlite"
+	_ "modernc.org/sqlite"
 )
 
 func newTestStore(t *testing.T) *sqlite.Store {
@@ -31,6 +34,9 @@ func TestSessionsCRUD(t *testing.T) {
 	if sess.ID == "" || sess.AgentID != "agent-1" || sess.UserID != "user-a" {
 		t.Fatalf("unexpected session: %+v", sess)
 	}
+	if sess.Revision != 1 {
+		t.Fatalf("revision=%d want 1", sess.Revision)
+	}
 
 	sess.State = map[string]any{"counter": 1.0}
 	sess.Messages = []metadata.Message{
@@ -47,6 +53,9 @@ func TestSessionsCRUD(t *testing.T) {
 	}
 	if err := s.UpdateSession(ctx, sess); err != nil {
 		t.Fatalf("UpdateSession: %v", err)
+	}
+	if sess.Revision != 2 {
+		t.Fatalf("revision after update=%d want 2", sess.Revision)
 	}
 
 	got, err := s.GetSession(ctx, sess.ID)
@@ -98,6 +107,43 @@ func TestSessionsCRUD(t *testing.T) {
 	}
 }
 
+func TestSessionRevisionConflictAndMessageReconciliation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sess, err := s.CreateSession(ctx, "agent", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left.Messages = []metadata.Message{{ID: "m1", Role: "user", Content: "one"}, {ID: "m2", Role: "assistant", Content: "two"}}
+	if err := s.UpdateSession(ctx, left); err != nil {
+		t.Fatal(err)
+	}
+	left.Messages = []metadata.Message{{ID: "m1", Role: "user", Content: "updated"}}
+	if err := s.UpdateSession(ctx, left); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSession(ctx, sess.ID)
+	if err != nil || got == nil || len(got.Messages) != 1 || got.Messages[0].Content != "updated" {
+		t.Fatalf("reconciled messages: err=%v session=%+v", err, got)
+	}
+	right.Messages = []metadata.Message{{ID: "stale", Role: "user", Content: "stale"}}
+	if err := s.UpdateSession(ctx, right); !errors.Is(err, metadata.ErrSessionConflict) {
+		t.Fatalf("stale update err=%v", err)
+	}
+	got, err = s.GetSession(ctx, sess.ID)
+	if err != nil || len(got.Messages) != 1 || got.Messages[0].ID != "m1" {
+		t.Fatalf("stale update changed state: err=%v session=%+v", err, got)
+	}
+}
+
 func TestSessionNotFoundReturnsNil(t *testing.T) {
 	s := newTestStore(t)
 	got, err := s.GetSession(context.Background(), "does-not-exist")
@@ -106,6 +152,58 @@ func TestSessionNotFoundReturnsNil(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("want nil session, got %+v", got)
+	}
+}
+
+func TestMigrationAddsRevisionToLegacySessions(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE sessions (
+		id TEXT PRIMARY KEY,
+		agent_id TEXT NOT NULL,
+		user_id TEXT DEFAULT '',
+		parent_session_id TEXT DEFAULT '',
+		state TEXT DEFAULT '{}',
+		open_interrupts TEXT DEFAULT '[]',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO sessions
+		(id, agent_id, user_id, parent_session_id, state, open_interrupts, created_at, updated_at)
+		VALUES ('legacy', 'agent', 'user', '', '{}', '[]', 10, 10)`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := sqlite.NewStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sess, err := store.GetSession(context.Background(), "legacy")
+	if err != nil || sess == nil {
+		t.Fatalf("legacy session: err=%v session=%+v", err, sess)
+	}
+	if sess.Revision != 1 {
+		t.Fatalf("legacy revision=%d want 1", sess.Revision)
+	}
+	sess.Messages = []metadata.Message{{ID: "m1", Role: "user", Content: "updated"}}
+	if err := store.UpdateSession(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if sess.Revision != 2 {
+		t.Fatalf("updated legacy revision=%d want 2", sess.Revision)
 	}
 }
 

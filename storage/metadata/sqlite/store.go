@@ -69,7 +69,32 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	migrations := []string{
+	if err := executeRequiredMigrations(ctx, s.db, schemaMigrations()); err != nil {
+		return err
+	}
+	addOptionalColumns(ctx, s.db, compatibilityMigrations())
+	return nil
+}
+
+func executeRequiredMigrations(ctx context.Context, db *sql.DB, statements []string) error {
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addOptionalColumns(ctx context.Context, db *sql.DB, statements []string) {
+	for _, statement := range statements {
+		// SQLite has no ADD COLUMN IF NOT EXISTS. These statements are only
+		// compatibility additions, so an already-present column is expected.
+		_, _ = db.ExecContext(ctx, statement)
+	}
+}
+
+func schemaMigrations() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id                TEXT PRIMARY KEY,
 			agent_id          TEXT NOT NULL,
@@ -77,6 +102,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			parent_session_id TEXT DEFAULT '',
 			state             TEXT DEFAULT '{}',
 			open_interrupts   TEXT DEFAULT '[]',
+			revision          INTEGER NOT NULL DEFAULT 1,
 			created_at        INTEGER NOT NULL,
 			updated_at        INTEGER NOT NULL
 		)`,
@@ -126,14 +152,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL
 		)`,
 	}
-	for _, m := range migrations {
-		if _, err := s.db.ExecContext(ctx, m); err != nil {
-			return err
-		}
-	}
+}
 
-	// Alter existing tables to add new columns (no-op if column already exists).
-	alters := []string{
+func compatibilityMigrations() []string {
+	return []string{
 		`ALTER TABLE tools ADD COLUMN handler TEXT DEFAULT 'http'`,
 		`ALTER TABLE tools ADD COLUMN endpoint TEXT DEFAULT ''`,
 		`ALTER TABLE tools ADD COLUMN headers TEXT DEFAULT '{}'`,
@@ -143,15 +165,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN open_interrupts TEXT DEFAULT '[]'`,
+		`ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'http'`,
 	}
-	for _, a := range alters {
-		// SQLite ALTER TABLE ADD COLUMN fails if the column already exists.
-		// Ignore the error since we only want to add missing columns.
-		s.db.ExecContext(ctx, a)
-	}
-
-	return nil
 }
 
 // --- Sessions ---
@@ -161,9 +177,13 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 	id := newID()
 	state := "{}"
 
-	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO sessions (id, agent_id, user_id, state, open_interrupts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		id, agentID, userID, state, "[]", now, now,
+	const insertSessionSQL = `INSERT INTO sessions
+		(id, agent_id, user_id, state, open_interrupts, revision, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(
+		ctx,
+		insertSessionSQL,
+		id, agentID, userID, state, "[]", 1, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: create session: %w", err)
@@ -176,6 +196,7 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 		Messages:       []metadata.Message{},
 		State:          map[string]any{},
 		OpenInterrupts: []metadata.Interrupt{},
+		Revision:       1,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}, nil
@@ -184,17 +205,37 @@ func (s *Store) CreateSession(ctx context.Context, agentID, userID string) (*met
 func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, error) {
 	var sess metadata.Session
 	var stateJSON, interruptsJSON string
+	var revision int64
 
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, state, open_interrupts, created_at, updated_at FROM sessions WHERE id = ?",
+	const selectSessionSQL = `SELECT
+		id, agent_id, user_id, parent_session_id, state, open_interrupts,
+		revision, created_at, updated_at
+		FROM sessions WHERE id = ?`
+	err := s.db.QueryRowContext(
+		ctx,
+		selectSessionSQL,
 		id,
-	).Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &stateJSON, &interruptsJSON, &sess.CreatedAt, &sess.UpdatedAt)
+	).Scan(
+		&sess.ID,
+		&sess.AgentID,
+		&sess.UserID,
+		&sess.ParentSessionID,
+		&stateJSON,
+		&interruptsJSON,
+		&revision,
+		&sess.CreatedAt,
+		&sess.UpdatedAt,
+	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: get session %q: %w", id, err)
 	}
+	if revision < 0 {
+		return nil, fmt.Errorf("sqlite: get session %q: invalid revision %d", id, revision)
+	}
+	sess.Revision = uint64(revision)
 
 	if err := json.Unmarshal([]byte(stateJSON), &sess.State); err != nil {
 		sess.State = map[string]any{}
@@ -216,54 +257,278 @@ func (s *Store) GetSession(ctx context.Context, id string) (*metadata.Session, e
 }
 
 func (s *Store) UpdateSession(ctx context.Context, sess *metadata.Session) error {
-	now := time.Now().UnixMilli()
-	sess.UpdatedAt = now
-
-	stateJSON, err := json.Marshal(sess.State)
+	if err := validateSessionUpdate(sess); err != nil {
+		return err
+	}
+	encoded, err := encodeSessionMetadata(sess)
 	if err != nil {
-		return fmt.Errorf("sqlite: marshal state: %w", err)
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	committed, err := updateSessionTransaction(ctx, tx, sess, encoded)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	applyCommittedSession(sess, committed)
+	return nil
+}
+
+type encodedSessionMetadata struct {
+	state          string
+	openInterrupts string
+}
+
+type committedSessionMetadata struct {
+	revision  uint64
+	createdAt int64
+	updatedAt int64
+}
+
+func validateSessionUpdate(sess *metadata.Session) error {
+	if sess == nil {
+		return fmt.Errorf("sqlite: update session: nil session")
+	}
+	const maxStoredRevision uint64 = 1<<63 - 1
+	if sess.Revision >= maxStoredRevision {
+		return fmt.Errorf("sqlite: update session %q: revision overflow", sess.ID)
+	}
+	return nil
+}
+
+func encodeSessionMetadata(sess *metadata.Session) (encodedSessionMetadata, error) {
+	state, err := json.Marshal(sess.State)
+	if err != nil {
+		return encodedSessionMetadata{}, fmt.Errorf("sqlite: marshal state: %w", err)
 	}
 	interrupts := sess.OpenInterrupts
 	if interrupts == nil {
 		interrupts = []metadata.Interrupt{}
 	}
-	interruptsJSON, err := json.Marshal(interrupts)
+	openInterrupts, err := json.Marshal(interrupts)
 	if err != nil {
-		return fmt.Errorf("sqlite: marshal open interrupts: %w", err)
+		return encodedSessionMetadata{}, fmt.Errorf("sqlite: marshal open interrupts: %w", err)
 	}
+	return encodedSessionMetadata{
+		state:          string(state),
+		openInterrupts: string(openInterrupts),
+	}, nil
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+func updateSessionTransaction(
+	ctx context.Context,
+	tx *sql.Tx,
+	sess *metadata.Session,
+	encoded encodedSessionMetadata,
+) (committedSessionMetadata, error) {
+	createdAt, currentUpdatedAt, err := loadSessionTimestamps(ctx, tx, sess.ID)
 	if err != nil {
-		return fmt.Errorf("sqlite: begin tx: %w", err)
+		return committedSessionMetadata{}, err
 	}
-	defer tx.Rollback()
+	updatedAt, err := nextSQLiteUpdatedAt(sess.ID, currentUpdatedAt)
+	if err != nil {
+		return committedSessionMetadata{}, err
+	}
+	expectedRevision := int64(sess.Revision)
+	nextRevision := expectedRevision + 1
+	if err := updateSessionRow(
+		ctx,
+		tx,
+		sess,
+		encoded,
+		expectedRevision,
+		nextRevision,
+		updatedAt,
+	); err != nil {
+		return committedSessionMetadata{}, err
+	}
+	if err := reconcileSessionMessages(ctx, tx, sess.ID, sess.Messages); err != nil {
+		return committedSessionMetadata{}, err
+	}
+	return committedSessionMetadata{
+		revision:  uint64(nextRevision),
+		createdAt: createdAt,
+		updatedAt: updatedAt,
+	}, nil
+}
 
-	_, err = tx.ExecContext(ctx,
-		"UPDATE sessions SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?, open_interrupts = ?, updated_at = ? WHERE id = ?",
-		sess.AgentID, sess.UserID, sess.ParentSessionID, string(stateJSON), string(interruptsJSON), now, sess.ID,
+func loadSessionTimestamps(ctx context.Context, tx *sql.Tx, sessionID string) (int64, int64, error) {
+	var createdAt, updatedAt int64
+	err := tx.QueryRowContext(
+		ctx,
+		"SELECT created_at, updated_at FROM sessions WHERE id = ?",
+		sessionID,
+	).Scan(&createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return 0, 0, fmt.Errorf("sqlite: update session %q: not found", sessionID)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("sqlite: inspect session %q: %w", sessionID, err)
+	}
+	return createdAt, updatedAt, nil
+}
+
+func nextSQLiteUpdatedAt(sessionID string, current int64) (int64, error) {
+	now := time.Now().UnixMilli()
+	if now > current {
+		return now, nil
+	}
+	if current == int64(^uint64(0)>>1) {
+		return 0, fmt.Errorf("sqlite: update session %q: updatedAt overflow", sessionID)
+	}
+	return current + 1, nil
+}
+
+func updateSessionRow(
+	ctx context.Context,
+	tx *sql.Tx,
+	sess *metadata.Session,
+	encoded encodedSessionMetadata,
+	expectedRevision int64,
+	nextRevision int64,
+	updatedAt int64,
+) error {
+	const updateSessionSQL = `UPDATE sessions
+		SET agent_id = ?, user_id = ?, parent_session_id = ?, state = ?,
+			open_interrupts = ?, revision = ?, updated_at = ?
+		WHERE id = ? AND revision = ?`
+	result, err := tx.ExecContext(
+		ctx,
+		updateSessionSQL,
+		sess.AgentID,
+		sess.UserID,
+		sess.ParentSessionID,
+		encoded.state,
+		encoded.openInterrupts,
+		nextRevision,
+		updatedAt,
+		sess.ID,
+		expectedRevision,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: update session: %w", err)
 	}
-
-	// Delete old messages and re-insert.
-	_, err = tx.ExecContext(ctx, "DELETE FROM session_messages WHERE session_id = ?", sess.ID)
+	updated, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("sqlite: delete old messages: %w", err)
+		return fmt.Errorf("sqlite: inspect session update: %w", err)
 	}
+	if updated > 0 {
+		return nil
+	}
+	return classifySessionUpdateMiss(ctx, tx, sess.ID)
+}
 
-	for _, msg := range sess.Messages {
-		tcJSON, _ := json.Marshal(msg.ToolCalls)
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO session_messages (id, session_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			msg.ID, sess.ID, msg.Role, msg.Content, string(tcJSON), msg.CreatedAt,
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: insert message: %w", err)
+func classifySessionUpdateMiss(ctx context.Context, tx *sql.Tx, sessionID string) error {
+	var exists int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", sessionID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("sqlite: update session %q: not found", sessionID)
+	}
+	if err != nil {
+		return fmt.Errorf("sqlite: inspect session %q: %w", sessionID, err)
+	}
+	return fmt.Errorf(
+		"sqlite: update session %q: %w (stored revision differs)",
+		sessionID,
+		metadata.ErrSessionConflict,
+	)
+}
+
+func reconcileSessionMessages(
+	ctx context.Context,
+	tx *sql.Tx,
+	sessionID string,
+	messages []metadata.Message,
+) error {
+	if err := deleteRemovedMessages(ctx, tx, sessionID, messages); err != nil {
+		return err
+	}
+	for _, message := range messages {
+		if err := upsertSessionMessage(ctx, tx, sessionID, message); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	return tx.Commit()
+func deleteRemovedMessages(
+	ctx context.Context,
+	tx *sql.Tx,
+	sessionID string,
+	messages []metadata.Message,
+) error {
+	if len(messages) == 0 {
+		_, err := tx.ExecContext(ctx, "DELETE FROM session_messages WHERE session_id = ?", sessionID)
+		if err != nil {
+			return fmt.Errorf("sqlite: delete old messages: %w", err)
+		}
+		return nil
+	}
+
+	placeholders := make([]byte, 0, len(messages)*2)
+	args := make([]any, 0, len(messages)+1)
+	args = append(args, sessionID)
+	for i, message := range messages {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args = append(args, message.ID)
+	}
+	query := "DELETE FROM session_messages WHERE session_id = ? AND id NOT IN (" +
+		string(placeholders) + ")"
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("sqlite: delete removed messages: %w", err)
+	}
+	return nil
+}
+
+func upsertSessionMessage(
+	ctx context.Context,
+	tx *sql.Tx,
+	sessionID string,
+	message metadata.Message,
+) error {
+	toolCalls, err := json.Marshal(message.ToolCalls)
+	if err != nil {
+		return fmt.Errorf("sqlite: marshal tool calls for message %q: %w", message.ID, err)
+	}
+	const upsertMessageSQL = `INSERT INTO session_messages
+		(id, session_id, role, content, tool_calls, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			session_id = excluded.session_id,
+			role = excluded.role,
+			content = excluded.content,
+			tool_calls = excluded.tool_calls,
+			created_at = excluded.created_at`
+	_, err = tx.ExecContext(
+		ctx,
+		upsertMessageSQL,
+		message.ID,
+		sessionID,
+		message.Role,
+		message.Content,
+		string(toolCalls),
+		message.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite: upsert message %q: %w", message.ID, err)
+	}
+	return nil
+}
+
+func applyCommittedSession(target *metadata.Session, committed committedSessionMetadata) {
+	target.Revision = committed.revision
+	target.CreatedAt = committed.createdAt
+	target.UpdatedAt = committed.updatedAt
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
@@ -275,53 +540,65 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListSessions(ctx context.Context, agentID string) ([]*metadata.Session, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC",
-		agentID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list sessions: %w", err)
-	}
-	defer rows.Close()
+	const query = `SELECT
+		id, agent_id, user_id, parent_session_id, revision, created_at, updated_at
+		FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC`
+	return s.querySessionSummaries(ctx, query, "list sessions", agentID)
+}
 
-	var sessions []*metadata.Session
-	for rows.Next() {
-		var sess metadata.Session
-		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("sqlite: scan session: %w", err)
-		}
-		sess.Messages = []metadata.Message{}
-		sessions = append(sessions, &sess)
+func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
+	const query = `SELECT
+		id, agent_id, user_id, parent_session_id, revision, created_at, updated_at
+		FROM sessions
+		WHERE agent_id = ? AND user_id = ?
+		ORDER BY updated_at DESC`
+	return s.querySessionSummaries(ctx, query, "list sessions by user", agentID, userID)
+}
+
+func (s *Store) querySessionSummaries(
+	ctx context.Context,
+	query string,
+	operation string,
+	args ...any,
+) ([]*metadata.Session, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: %s: %w", operation, err)
 	}
-	if sessions == nil {
-		sessions = []*metadata.Session{}
+	defer func() { _ = rows.Close() }()
+
+	sessions := make([]*metadata.Session, 0)
+	for rows.Next() {
+		sess, err := scanSessionSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, sess)
 	}
 	return sessions, nil
 }
 
-func (s *Store) ListSessionsByUser(ctx context.Context, agentID, userID string) ([]*metadata.Session, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, user_id, parent_session_id, created_at, updated_at FROM sessions WHERE agent_id = ? AND user_id = ? ORDER BY updated_at DESC",
-		agentID, userID,
+func scanSessionSummary(rows *sql.Rows) (*metadata.Session, error) {
+	var sess metadata.Session
+	var revision int64
+	err := rows.Scan(
+		&sess.ID,
+		&sess.AgentID,
+		&sess.UserID,
+		&sess.ParentSessionID,
+		&revision,
+		&sess.CreatedAt,
+		&sess.UpdatedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: list sessions by user: %w", err)
+		return nil, fmt.Errorf("sqlite: scan session: %w", err)
 	}
-	defer rows.Close()
-
-	var sessions []*metadata.Session
-	for rows.Next() {
-		var sess metadata.Session
-		if err := rows.Scan(&sess.ID, &sess.AgentID, &sess.UserID, &sess.ParentSessionID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("sqlite: scan session: %w", err)
-		}
-		sess.Messages = []metadata.Message{}
-		sessions = append(sessions, &sess)
+	if revision < 0 {
+		return nil, fmt.Errorf("sqlite: scan session: invalid revision %d", revision)
 	}
-	if sessions == nil {
-		sessions = []*metadata.Session{}
-	}
-	return sessions, nil
+	sess.Revision = uint64(revision)
+	sess.Messages = []metadata.Message{}
+	return &sess, nil
 }
 
 func (s *Store) loadMessages(ctx context.Context, sessionID string) ([]metadata.Message, error) {
@@ -376,7 +653,9 @@ func (s *Store) SaveTool(ctx context.Context, td *metadata.ToolDef) error {
 	}
 
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO tools (id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, response_field, script_path, created_at)
+		`INSERT INTO tools
+		 (id, agent_id, name, description, parameters, handler, endpoint, headers,
+		  input_mapping, response_field, script_path, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   agent_id       = excluded.agent_id,
@@ -389,7 +668,8 @@ func (s *Store) SaveTool(ctx context.Context, td *metadata.ToolDef) error {
 		   response_field = excluded.response_field,
 		   script_path    = excluded.script_path`,
 		td.ID, td.AgentID, td.Name, td.Description, string(paramsJSON),
-		td.Handler, td.Endpoint, string(headersJSON), string(mappingJSON), td.ResponseField, td.ScriptPath, td.CreatedAt,
+		td.Handler, td.Endpoint, string(headersJSON), string(mappingJSON),
+		td.ResponseField, td.ScriptPath, td.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite: save tool %q: %w", td.Name, err)
@@ -401,10 +681,28 @@ func (s *Store) GetTool(ctx context.Context, name string) (*metadata.ToolDef, er
 	var td metadata.ToolDef
 	var paramsJSON, headersJSON, mappingJSON string
 
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, response_field, script_path, created_at FROM tools WHERE name = ?",
+	const query = `SELECT
+		id, agent_id, name, description, parameters, handler, endpoint, headers,
+		input_mapping, response_field, script_path, created_at
+		FROM tools WHERE name = ?`
+	err := s.db.QueryRowContext(
+		ctx,
+		query,
 		name,
-	).Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ResponseField, &td.ScriptPath, &td.CreatedAt)
+	).Scan(
+		&td.ID,
+		&td.AgentID,
+		&td.Name,
+		&td.Description,
+		&paramsJSON,
+		&td.Handler,
+		&td.Endpoint,
+		&headersJSON,
+		&mappingJSON,
+		&td.ResponseField,
+		&td.ScriptPath,
+		&td.CreatedAt,
+	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -425,8 +723,13 @@ func (s *Store) GetTool(ctx context.Context, name string) (*metadata.ToolDef, er
 }
 
 func (s *Store) ListTools(ctx context.Context, agentID string) ([]*metadata.ToolDef, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, agent_id, name, description, parameters, handler, endpoint, headers, input_mapping, response_field, script_path, created_at FROM tools WHERE agent_id = ?",
+	const query = `SELECT
+		id, agent_id, name, description, parameters, handler, endpoint, headers,
+		input_mapping, response_field, script_path, created_at
+		FROM tools WHERE agent_id = ?`
+	rows, err := s.db.QueryContext(
+		ctx,
+		query,
 		agentID,
 	)
 	if err != nil {
@@ -438,7 +741,20 @@ func (s *Store) ListTools(ctx context.Context, agentID string) ([]*metadata.Tool
 	for rows.Next() {
 		var td metadata.ToolDef
 		var paramsJSON, headersJSON, mappingJSON string
-		if err := rows.Scan(&td.ID, &td.AgentID, &td.Name, &td.Description, &paramsJSON, &td.Handler, &td.Endpoint, &headersJSON, &mappingJSON, &td.ResponseField, &td.ScriptPath, &td.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&td.ID,
+			&td.AgentID,
+			&td.Name,
+			&td.Description,
+			&paramsJSON,
+			&td.Handler,
+			&td.Endpoint,
+			&headersJSON,
+			&mappingJSON,
+			&td.ResponseField,
+			&td.ScriptPath,
+			&td.CreatedAt,
+		); err != nil {
 			return nil, fmt.Errorf("sqlite: scan tool: %w", err)
 		}
 		_ = json.Unmarshal([]byte(paramsJSON), &td.Parameters)
@@ -717,7 +1033,16 @@ func (s *Store) ListMCPServers(ctx context.Context, agentID string) ([]*metadata
 		var srv metadata.MCPServerDef
 		var headersJSON string
 		var enabled int
-		if err := rows.Scan(&srv.ID, &srv.AgentID, &srv.Name, &srv.URL, &srv.Transport, &headersJSON, &enabled, &srv.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&srv.ID,
+			&srv.AgentID,
+			&srv.Name,
+			&srv.URL,
+			&srv.Transport,
+			&headersJSON,
+			&enabled,
+			&srv.CreatedAt,
+		); err != nil {
 			return nil, fmt.Errorf("sqlite: scan mcp server: %w", err)
 		}
 		srv.Enabled = enabled == 1

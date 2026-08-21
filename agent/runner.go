@@ -151,6 +151,11 @@ func (a *Agent) RunWithSession(
 		Content:   input,
 		CreatedAt: time.Now().UnixMilli(),
 	})
+	// Persist the user turn before any compaction or provider work. The store
+	// decides whether this snapshot is rewritten or journaled incrementally.
+	if err := a.persistSession(ctx, sess); err != nil {
+		return nil, fmt.Errorf("agent: persist user message: %w", err)
+	}
 
 	// 3. Compact if needed
 	if shouldCompact(sess.Messages, a.compaction) {
@@ -159,6 +164,9 @@ func (a *Agent) RunWithSession(
 			log.Printf("compaction failed: %v", err)
 		} else {
 			sess.Messages = compacted
+			if err := a.persistSession(ctx, sess); err != nil {
+				return nil, fmt.Errorf("agent: persist compaction: %w", err)
+			}
 		}
 	}
 
@@ -227,8 +235,17 @@ func (a *Agent) continueAgenticLoop(
 		var responseToolCalls []provider.ToolCall
 		var textMessageID string
 		textStarted := false
+		var streamErr error
 
 		for event := range stream {
+			if providerEvent, ok := event.(*provider.ErrorProviderEvent); ok {
+				streamErr = providerEvent.Err
+				if streamErr == nil {
+					streamErr = fmt.Errorf("provider stream failed")
+				}
+				continue
+			}
+
 			switch ev := event.(type) {
 			case *provider.TextDeltaEvent:
 				if !textStarted {
@@ -266,6 +283,15 @@ func (a *Agent) continueAgenticLoop(
 			events <- protoEvent
 		}
 
+		if streamErr != nil {
+			events <- &ErrorEvent{Err: streamErr}
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			events <- &ErrorEvent{Err: err}
+			return
+		}
+
 		// Emit TextEnd if we started a text message
 		if textStarted {
 			endEvt := &TextEndEvent{MessageID: textMessageID}
@@ -286,6 +312,10 @@ func (a *Agent) continueAgenticLoop(
 					Content:   responseContent,
 					CreatedAt: time.Now().UnixMilli(),
 				})
+				if err := a.persistSession(context.Background(), sess); err != nil {
+					events <- &ErrorEvent{Err: fmt.Errorf("agent: persist assistant message: %w", err)}
+					return
+				}
 			}
 			break
 		}
@@ -307,6 +337,10 @@ func (a *Agent) continueAgenticLoop(
 			ToolCalls: tcRecords,
 			CreatedAt: time.Now().UnixMilli(),
 		})
+		if err := a.persistSession(context.Background(), sess); err != nil {
+			events <- &ErrorEvent{Err: fmt.Errorf("agent: persist assistant tool batch: %w", err)}
+			return
+		}
 
 		// Emit tool call arguments so clients can display request data.
 		// Each call produces an args frame followed by an end frame so
@@ -336,8 +370,9 @@ func (a *Agent) continueAgenticLoop(
 				sess.Messages[assistantMsgIdx].ToolCalls[i].Status = pendingStatusFor(tc.ID, intrs)
 			}
 			sess.OpenInterrupts = interruptsToMetadata(intrs)
-			if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
-				log.Printf("session save failed: %v", err)
+			if err := a.persistSession(context.Background(), sess); err != nil {
+				events <- &ErrorEvent{Err: fmt.Errorf("agent: persist interrupt: %w", err)}
+				return
 			}
 			events <- &RunFinishedEvent{
 				ThreadID:   threadID,
@@ -367,6 +402,10 @@ func (a *Agent) continueAgenticLoop(
 					sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
 					sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
 				}
+				if err := a.persistSession(context.Background(), sess); err != nil {
+					events <- &ErrorEvent{Err: fmt.Errorf("agent: persist tool result: %w", err)}
+					return
+				}
 
 				events <- &ToolResultEvent{
 					ToolCallID: tc.ID,
@@ -390,6 +429,10 @@ func (a *Agent) continueAgenticLoop(
 				if i < len(sess.Messages[assistantMsgIdx].ToolCalls) {
 					sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
 					sess.Messages[assistantMsgIdx].ToolCalls[i].Status = "failed"
+				}
+				if err := a.persistSession(context.Background(), sess); err != nil {
+					events <- &ErrorEvent{Err: fmt.Errorf("agent: persist invalid-argument tool result: %w", err)}
+					return
 				}
 
 				events <- &ToolResultEvent{
@@ -420,6 +463,10 @@ func (a *Agent) continueAgenticLoop(
 				sess.Messages[assistantMsgIdx].ToolCalls[i].Result = resultStr
 				sess.Messages[assistantMsgIdx].ToolCalls[i].Status = status
 			}
+			if err := a.persistSession(context.Background(), sess); err != nil {
+				events <- &ErrorEvent{Err: fmt.Errorf("agent: persist tool result: %w", err)}
+				return
+			}
 
 			// Append tool result for next iteration
 			providerMsgs = append(providerMsgs, provider.Message{
@@ -435,13 +482,11 @@ func (a *Agent) continueAgenticLoop(
 		}
 	}
 
-	// Emit RunFinished
+	// Every session mutation in this loop is persisted before its associated
+	// event or the next provider/tool transition. Do not issue an identical
+	// final UpdateSession here: UpdateSession advances the optimistic revision,
+	// so a redundant call would create a revision without a state transition.
 	events <- &RunFinishedEvent{ThreadID: threadID, RunID: runID, Outcome: OutcomeSuccess}
-
-	// Save session (use Background context to survive request cancellation)
-	if err := a.Store.UpdateSession(context.Background(), sess); err != nil {
-		log.Printf("session save failed: %v", err)
-	}
 }
 
 // RunSubagent spawns a child agent, creates a session, runs it, and collects the final text response.
